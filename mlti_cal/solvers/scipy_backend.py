@@ -54,6 +54,11 @@ from mlti_cal.solvers.base import (
 #: `method` values scipy exposes, with the trade-off that matters here.
 METHODS = ("trf", "lm", "dogbox")
 
+#: Column count below which a direct (dense) trust-region solve is preferred.
+#: A dense 2000x2000 normal-equation factorisation is still cheap; beyond that
+#: the memory, not the iteration count, becomes the binding constraint.
+DENSE_COLUMN_LIMIT = 2000
+
 
 @register_backend
 class ScipyBackend(SolverBackend):
@@ -68,8 +73,24 @@ class ScipyBackend(SolverBackend):
         method = opts.get("method", "trf")
         if method not in METHODS:
             raise ValueError(f"scipy method must be one of {METHODS}, got {method!r}")
-        tr_solver = opts.get("tr_solver", "lsmr" if method != "lm" else None)
+
+        # Default trust-region solver by problem size, not by habit.
+        #
+        # 'lsmr' is iterative: it returns an APPROXIMATE step, and on a small
+        # well-posed problem those approximations stall the trust region --
+        # measured here, an 84-column problem burned 5000 function evaluations
+        # (145 s) without converging, while the same problem with 'exact'
+        # converges in seconds. 'exact' factorises directly but needs a dense
+        # Jacobian, so it is only the right default while the column count is
+        # small. Above the threshold the dense factorisation is the thing that
+        # would blow up, and 'lsmr' becomes correct.
+        n_free_est = problem.num_free_params
+        default_tr = (
+            None if method == "lm" else ("exact" if n_free_est <= DENSE_COLUMN_LIMIT else "lsmr")
+        )
+        tr_solver = opts.get("tr_solver", default_tr)
         x_scale = opts.get("x_scale", "jac")
+        dense_jac = method == "lm" or tr_solver == "exact"
 
         base_state = problem.get_state()
         n_free = problem.num_free_params
@@ -109,8 +130,8 @@ class ScipyBackend(SolverBackend):
             _, J = problem.evaluate(
                 with_jacobian=True, tangent_transform=right_jacobian_transforms(deltas)
             )
-            # 'lm' is a dense-only method in scipy and rejects sparse input.
-            return J.toarray() if method == "lm" else sp.csr_matrix(J)
+            # 'lm' and tr_solver='exact' are dense-only and reject sparse input.
+            return J.toarray() if dense_jac else sp.csr_matrix(J)
 
         kwargs = dict(
             fun=fun,

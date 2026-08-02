@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlti-object-cal"
+version = "0.1.0"
+description = "Multi-camera / multi-object calibration workbench with honest uncertainty reporting"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.14",
+    # 5.x line carries the OpenCV-5 aruco API the detectors target. Verified: plain
+    # pin resolves to a stable wheel (5.0.0.93), no --pre needed.
+    "opencv-contrib-python==5.*",
+    "matplotlib>=3.9",
+    "pyceres>=2.6",
+]
+
+[project.optional-dependencies]
+# Qt lives here, never in `dependencies`: the core (detectors/models/problem/
+# solvers/report/project/io) must import and run with zero Qt present.
+gui = [
+    "PySide6>=6.11",
+    "pyqtgraph>=0.13",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.setuptools.packages.find]
+include = ["mlti_cal*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

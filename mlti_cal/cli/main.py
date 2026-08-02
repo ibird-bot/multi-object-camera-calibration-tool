@@ -150,7 +150,7 @@ def cmd_compare(args) -> int:
     print(f"{'backend':<10} {'ok':<5} {'iters':>7} {'time_s':>9} {'final_cost':>14} {'rms_px':>9}")
     print("-" * 78)
     rows = []
-    for name, (ok, why) in backend_status().items():
+    for name, (ok, _why) in backend_status().items():
         if not ok:
             print(f"{name:<10} {'-':<5} {'-':>7} {'-':>9} {'unavailable':>14} {'-':>9}")
             continue

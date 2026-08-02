@@ -59,8 +59,8 @@ from mlti_cal.models.manifolds import quat_to_matrix
 from mlti_cal.problem.graph import POSE, Problem
 from mlti_cal.solvers.base import (
     SolveOptions,
-    SolveResult,
     SolverBackend,
+    SolveResult,
     count_behind_camera,
     per_corner_rms,
     register_backend,

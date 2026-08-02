@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 from mlti_cal.gui.session import Session, SolveWorker, run_in_thread
 from mlti_cal.gui.widgets import PlotCanvas
 from mlti_cal.problem.loss import available_losses
-from mlti_cal.problem.reprojection import extr_key, intr_key
+from mlti_cal.problem.reprojection import extr_key
 from mlti_cal.solvers import SolveOptions, backend_status
 from mlti_cal.solvers.catalog import CATALOG
 

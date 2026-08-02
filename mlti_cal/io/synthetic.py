@@ -193,7 +193,7 @@ def generate_dataset(
             board_pts = system.boards[bid].object_points
             X_rig = board_pts @ R.T + t
 
-            for cid, cam in system.cameras.items():
+            for cid in system.cameras:
                 E = gt.camera_extrinsics[cid]
                 R_E, t_E = quat_to_matrix(E[3:7]), E[0:3]
                 X_cam = X_rig @ R_E.T + t_E

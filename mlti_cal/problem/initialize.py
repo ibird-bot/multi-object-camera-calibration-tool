@@ -23,11 +23,9 @@ import numpy as np
 
 from mlti_cal.models.manifolds import (
     IDENTITY_POSE,
-    matrix_to_quat,
     pose_compose,
     pose_from_rt,
     pose_inverse,
-    quat_to_matrix,
 )
 from mlti_cal.problem.types import CalibrationSystem
 

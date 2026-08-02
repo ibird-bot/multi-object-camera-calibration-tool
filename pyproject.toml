@@ -29,6 +29,12 @@ dev = [
     "ruff>=0.6",
 ]
 
+[project.scripts]
+mlti-cal = "mlti_cal.cli.main:main"
+
+[project.gui-scripts]
+mlti-cal-gui = "mlti_cal.gui.app:main"
+
 [tool.setuptools.packages.find]
 include = ["mlti_cal*"]
 

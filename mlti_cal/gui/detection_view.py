@@ -36,7 +36,6 @@ from PySide6.QtWidgets import (
 
 from mlti_cal.detectors.charuco import (
     DICTIONARIES,
-    CharucoBoardSpec,
     MultiBoardDetector,
     draw_detections,
 )

@@ -46,7 +46,8 @@ class WeakDirection:
     def describe(self) -> str:
         parts = ", ".join(f"{n} ({w:+.2f})" for n, w in self.top_parameters)
         state = "DISCARDED" if self.discarded else "weak"
-        return f"[{state}] s={self.singular_value:.3e} (1/{1 / max(self.ratio_to_largest, 1e-300):.1e}): {parts}"
+        inv_ratio = 1 / max(self.ratio_to_largest, 1e-300)
+        return f"[{state}] s={self.singular_value:.3e} (1/{inv_ratio:.1e}): {parts}"
 
 
 @dataclass

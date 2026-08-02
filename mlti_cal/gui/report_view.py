@@ -284,11 +284,16 @@ class ReportView(QWidget):
         if gt:
             rchi2 = gt.get("reduced_chi2", float("nan"))
             good = 0.5 < rchi2 < 2.0
+            verdict = (
+                "the reported uncertainty is honest"
+                if good
+                else "THE REPORTED UNCERTAINTY IS NOT TRUSTWORTHY"
+            )
             parts.append(
                 f"<div style='padding:4px;background:{'#e6f4ea' if good else '#fdecea'};'>"
                 f"<b>Ground-truth check:</b> reduced chi-squared "
                 f"<b>{rchi2:.3f}</b> (want ~1.0) &mdash; "
-                f"{'the reported uncertainty is honest' if good else 'THE REPORTED UNCERTAINTY IS NOT TRUSTWORTHY'}"
+                f"{verdict}"
                 f"</div>"
             )
         for item in report.warnings:

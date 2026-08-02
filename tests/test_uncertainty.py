@@ -262,8 +262,11 @@ def test_projection_uncertainty_map_is_finite_and_positive():
     system, _, problem, _ = solved()
     cov = compute_covariance(problem)
     m = projection_uncertainty(problem, system, cov, "cam0", range_m=1.5, grid_step=48)
-    assert np.all(np.isfinite(m.sigma_max))
-    assert np.all(m.sigma_max >= 0)
+    # Finiteness is asserted only where the distortion model is invertible;
+    # elsewhere NaN is the correct answer, not a defect.
+    assert m.valid.any(), "no pixel was invertible -- the map is useless"
+    assert np.all(np.isfinite(m.sigma_max[m.valid]))
+    assert np.all(m.sigma_max[m.valid] >= 0)
     assert m.worst() >= m.at_centre()
 
 
@@ -278,6 +281,41 @@ def test_uncertainty_grows_away_from_the_covered_centre():
         np.mean([m.sigma_max[0, 0], m.sigma_max[0, -1], m.sigma_max[-1, 0], m.sigma_max[-1, -1]])
     )
     assert corners >= centre * 0.95, f"corners {corners:.4f} vs centre {centre:.4f}"
+
+
+def test_non_invertible_distortion_region_is_masked_not_reported():
+    """
+    Regression: cv2.undistortPoints does not signal failure -- its fixed-point
+    iteration silently diverges where the fitted distortion polynomial is not
+    invertible, which on real coverage is most of the image corners. Before the
+    round-trip validity check, that produced a reported projection uncertainty
+    of 1.8 MILLION pixels on this project's own demo data.
+
+    Invalid pixels must be NaN and excluded, never reported as a number.
+    """
+    system, _, problem, _ = solved(num_cameras=1, num_frames=12)
+    cov = compute_covariance(problem)
+    m = projection_uncertainty(problem, system, cov, "cam0", range_m=1.5, grid_step=32)
+
+    assert m.worst() < 1e4, f"worst sigma {m.worst():.1f} px is not a physical value"
+    assert np.all(np.isnan(m.sigma_max[~m.valid])), "invalid pixels must be NaN"
+    assert np.all(np.isfinite(m.sigma_max[m.valid]))
+    assert 0.0 <= m.invalid_fraction < 1.0
+    # Whatever survives must be reported honestly as a fraction.
+    assert "invalid_fraction" in m.to_dict()
+
+
+def test_unproject_flags_uninvertible_pixels():
+    from mlti_cal.models.camera import get_model
+    from mlti_cal.report.uncertainty import unproject
+
+    model = get_model("pinhole_radtan")
+    # A wildly negative k3 makes the polynomial non-invertible off-axis.
+    params = np.array([900.0, 900.0, 640.0, 360.0, -0.3, 0.1, 0.0, 0.0, -8.0])
+    pixels = np.array([[640.0, 360.0], [5.0, 5.0], [1275.0, 715.0]])
+    _, valid = unproject("pinhole_radtan", params, pixels, model=model)
+    assert valid[0], "the optical centre must always invert"
+    assert not valid.all(), "extreme corners must be flagged with this distortion"
 
 
 def test_uncertainty_requires_an_explicit_range():

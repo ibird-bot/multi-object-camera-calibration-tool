@@ -63,6 +63,11 @@ class UncertaintyMap:
         h, w = self.sigma_max.shape
         return float(self.sigma_max[h // 2, w // 2])
 
+    @property
+    def invalid_fraction(self) -> float:
+        """Share of the sensor where the distortion model is not invertible."""
+        return float(1.0 - self.valid.mean())
+
     def to_dict(self) -> dict:
         return {
             "camera": self.camera,
@@ -70,6 +75,7 @@ class UncertaintyMap:
             "worst_sigma_px": self.worst(),
             "best_sigma_px": self.best(),
             "centre_sigma_px": self.at_centre(),
+            "invalid_fraction": self.invalid_fraction,
             "shape": list(self.sigma_max.shape),
         }
 
@@ -85,13 +91,28 @@ def _block_columns(problem: Problem, key: str) -> tuple[np.ndarray, np.ndarray]:
     return np.arange(start, start + free_idx.size), free_idx
 
 
-def unproject(model_name: str, params: np.ndarray, pixels: np.ndarray) -> np.ndarray:
+def unproject(
+    model_name: str,
+    params: np.ndarray,
+    pixels: np.ndarray,
+    model=None,
+    tolerance_px: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Pixels -> unit rays in the camera frame, inverting the distortion.
 
-    OpenCV's iterative undistortion is used rather than a hand-rolled inverse;
-    it is the same code that will undistort the user's images, so the map and
-    the images stay consistent.
+    Returns (rays, valid). OpenCV's iterative undistortion is used rather than a
+    hand-rolled inverse, so the map stays consistent with the code that will
+    actually undistort the user's images.
+
+    THE VALIDITY CHECK IS NOT OPTIONAL. A distortion polynomial fitted on the
+    middle of the sensor is frequently non-invertible near the corners, and
+    `cv2.undistortPoints` does not report failure -- its fixed-point iteration
+    simply diverges and returns a huge normalised coordinate. Propagating that
+    through the Jacobian produced a reported "uncertainty" of 1.8 MILLION
+    pixels on this project's own demo data. Round-tripping each pixel and
+    marking the failures invalid turns a nonsense number into an honest
+    "outside the region this calibration can speak for".
     """
     pts = np.asarray(pixels, dtype=float).reshape(-1, 1, 2)
     fx, fy, cx, cy = params[:4]
@@ -102,7 +123,17 @@ def unproject(model_name: str, params: np.ndarray, pixels: np.ndarray) -> np.nda
     else:
         norm = cv2.undistortPoints(pts, K, dist.reshape(1, -1)).reshape(-1, 2)
     rays = np.column_stack([norm, np.ones(norm.shape[0])])
-    return rays / np.linalg.norm(rays, axis=1, keepdims=True)
+
+    valid = np.all(np.isfinite(rays), axis=1)
+    if model is not None:
+        safe = np.where(valid[:, None], rays, np.array([0.0, 0.0, 1.0]))
+        back = model.project(params, safe)
+        err = np.linalg.norm(back - np.asarray(pixels, dtype=float), axis=1)
+        valid &= np.isfinite(err) & (err < tolerance_px)
+
+    norms = np.linalg.norm(rays, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return rays / norms, valid
 
 
 def projection_uncertainty(
@@ -131,7 +162,7 @@ def projection_uncertainty(
     gu, gv = np.meshgrid(us, vs)
     pix = np.column_stack([gu.ravel(), gv.ravel()]).astype(float)
 
-    rays = unproject(cam.model_name, cam.params, pix)
+    rays, ray_valid = unproject(cam.model_name, cam.params, pix, model=model)
     X_cam = rays * range_m
 
     ik, i_sel = _block_columns(problem, intr_key(camera_id))
@@ -164,9 +195,16 @@ def projection_uncertainty(
     tr = a + d
     disc = np.sqrt(np.maximum((a - d) ** 2 + 4 * b * b, 0.0))
     lam_max = 0.5 * (tr + disc)
-    sigma_max = np.sqrt(np.maximum(lam_max, 0.0)).reshape(gu.shape)
-    sigma_rms = np.sqrt(np.maximum(tr * 0.5, 0.0)).reshape(gu.shape)
-    valid = np.isfinite(sigma_max)
+    sigma_max = np.sqrt(np.maximum(lam_max, 0.0))
+    sigma_rms = np.sqrt(np.maximum(tr * 0.5, 0.0))
+
+    # Pixels whose distortion could not be inverted carry no meaningful
+    # uncertainty. They are NaN'd rather than zeroed so they cannot be mistaken
+    # for confident regions, and excluded from worst()/best().
+    valid = ray_valid & np.isfinite(sigma_max)
+    sigma_max = np.where(valid, sigma_max, np.nan).reshape(gu.shape)
+    sigma_rms = np.where(valid, sigma_rms, np.nan).reshape(gu.shape)
+    valid = valid.reshape(gu.shape)
 
     return UncertaintyMap(
         camera=camera_id,

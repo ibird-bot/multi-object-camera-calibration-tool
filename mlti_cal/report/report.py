@@ -157,6 +157,12 @@ class CalibrationReport:
                     f"  {cid} @ {m.range_m:.1f} m: centre {m.at_centre():.4f} px, "
                     f"worst {m.worst():.4f} px"
                 )
+                if m.invalid_fraction > 0.001:
+                    add(
+                        f"      {m.invalid_fraction * 100:.0f}% of the sensor excluded: "
+                        f"the distortion model is not invertible there, so this "
+                        f"calibration cannot speak for those pixels at all."
+                    )
 
         if self.crossval:
             add("")
@@ -171,9 +177,23 @@ class CalibrationReport:
             add("")
             add("-- GROUND-TRUTH CHECK (synthetic only) " + "-" * 38)
             g = self.gt_check
-            add(f"  parameters within 1 sigma: {g['within_1_sigma'] * 100:.1f}%  (expect ~68%)")
-            add(f"  parameters within 2 sigma: {g['within_2_sigma'] * 100:.1f}%  (expect ~95%)")
-            add(f"  worst: {g['worst']['parameter']} at {g['worst']['n_sigma']:.2f} sigma")
+            rchi2 = g.get("reduced_chi2", float("nan"))
+            verdict = (
+                "uncertainty is honest" if 0.5 < rchi2 < 2.0 else "UNCERTAINTY IS NOT TRUSTWORTHY"
+            )
+            add(f"  reduced chi-squared: {rchi2:.3f}  (want ~1.0)  ->  {verdict}")
+            add(
+                f"  worst parameter: {g['worst']['parameter']} at {g['worst']['n_sigma']:.2f} sigma"
+            )
+            add(
+                f"  within 1/2/3 sigma: {g['within_1_sigma'] * 100:.0f}% / "
+                f"{g['within_2_sigma'] * 100:.0f}% / {g['within_3_sigma'] * 100:.0f}%"
+            )
+            add(
+                "    (marginal percentages, NOT independent samples: one weakly-"
+                "constrained mode moves dozens of"
+            )
+            add("     parameters together. Judge the covariance by reduced chi-squared.)")
 
         add("")
         add("-- WARNINGS " + "-" * 65)

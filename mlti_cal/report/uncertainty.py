@@ -227,6 +227,48 @@ def parameter_error_vs_uncertainty(
 
     n_sigmas = np.array([r["n_sigma"] for r in rows])
     finite = n_sigmas[np.isfinite(n_sigmas)]
+
+    # ---- the statistically correct check --------------------------------
+    # The per-parameter fractions above are easy to read but easy to
+    # MISREAD: parameter errors are strongly correlated, so they are not
+    # independent samples. In practice a single weakly-constrained mode (the
+    # classic cx <-> board-x-translation <-> board-tilt degeneracy) slides as
+    # one unit and drags dozens of parameters to the same n-sigma with the
+    # same sign. Reading that as "dozens of parameters are 2.7 sigma out"
+    # overstates the evidence enormously -- it is ONE draw, not dozens.
+    #
+    # The Mahalanobis distance e^T Sigma^-1 e removes the correlation and is
+    # distributed as chi^2 with n degrees of freedom under a correct
+    # covariance, so chi2/n should be ~1. THAT is the number to judge a
+    # covariance by from a single realisation.
+    err_vec = np.zeros(len(cov.labels))
+    for r in rows:
+        err_vec[cov.labels.index(r["parameter"])] = r["error"]
+
+    # Computed as ||J e||^2 / sigma^2, NOT as e^T pinv(Sigma) e.
+    #
+    # They are algebraically identical, since Sigma = sigma^2 (J^T J)^+ and so
+    # Sigma^-1 = J^T J / sigma^2 on the observable subspace. Numerically they
+    # are not remotely the same: cond(Sigma) = cond(J)^2, which on a normal
+    # calibration is ~1e11-1e12, so inverting Sigma in float64 throws away most
+    # of the available precision and produced chi2 values inflated by up to 6x
+    # on this very data. Multiplying by J instead never squares the condition
+    # number and is also far cheaper.
+    chi2 = float("nan")
+    reduced = float("nan")
+    p_value = float("nan")
+    try:
+        from scipy import stats as sps
+
+        _, J = problem.evaluate(with_jacobian=True)
+        Je = J @ err_vec
+        chi2 = float(Je @ Je) / cov.sigma2_used
+        dof = int(cov.rank)
+        reduced = chi2 / dof if dof else float("nan")
+        p_value = float(sps.chi2.sf(chi2, dof)) if dof else float("nan")
+    except Exception:  # pragma: no cover - numerical edge cases only
+        pass
+
     return {
         "parameters": rows,
         "num_parameters": len(rows),
@@ -235,4 +277,13 @@ def parameter_error_vs_uncertainty(
         "within_3_sigma": float(np.mean(finite <= 3.0)) if finite.size else float("nan"),
         "max_n_sigma": float(finite.max()) if finite.size else float("nan"),
         "worst": max(rows, key=lambda r: r["n_sigma"]) if rows else None,
+        "mahalanobis_chi2": chi2,
+        "chi2_dof": int(cov.rank),
+        "reduced_chi2": reduced,
+        "chi2_pvalue": p_value,
+        "note": (
+            "reduced_chi2 ~ 1 means the covariance is honest. The within_N_sigma "
+            "fractions are marginal and correlated -- do not treat them as N "
+            "independent samples."
+        ),
     }

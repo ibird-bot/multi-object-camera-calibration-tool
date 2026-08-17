@@ -1,7 +1,7 @@
 """
 The calibration system description: cameras, boards, frames, observations.
 
-Coordinate conventions -- stated explicitly, per project CLAUDE.md:
+Coordinate conventions -- stated explicitly:
 
   * Camera frame is OpenCV: +x right, +y down, +z forward into the scene.
   * A pose named `T_a_b` maps points from frame b into frame a:

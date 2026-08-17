@@ -1,5 +1,7 @@
 # mlti_object_cal
 
+**Version 0.1.0** | Licensed under the [MIT License](LICENSE)
+
 A multi-camera, multi-object calibration workbench.
 
 You can add as many calibration objects as you need and as many cameras as you
@@ -82,3 +84,7 @@ Stated explicitly, because getting these wrong is silent:
 pip install pytest
 pytest
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

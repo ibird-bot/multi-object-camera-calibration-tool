@@ -1,15 +1,32 @@
-# mlti_object_cal
+# Multi Object Camera Calibration Tool
 
-**Version 0.1.0** | Licensed under the [MIT License](LICENSE)
+**Version 0.1.0** | [MIT License](LICENSE) | Python 3.12
 
-A multi-camera, multi-object calibration workbench.
+An open-source multi-camera calibration tool for calibrating **any number of
+cameras** against **any number of calibration objects** at the same time.
+Charuco board detection, eight camera models, and a desktop GUI.
 
 You can add as many calibration objects as you need and as many cameras as you
 like. Boards and cameras are declared in the setup tab, detected, then solved
-together in a single optimisation, so every camera pose and every board pose is
-estimated in one consistent frame. Alongside the calibration it reports how much
-the result can be trusted: parameter covariance, per-pixel projection
+together in a single bundle adjustment, so every camera pose and every board
+pose is estimated in one consistent frame. Alongside the calibration it reports
+how much the result can be trusted: parameter covariance, per-pixel projection
 uncertainty, residual maps, coverage and cross-validated held-out error.
+
+### What it does
+
+- **Multi-camera calibration** for rigs of any size, not just stereo pairs
+- **Multi-object calibration**: several Charuco boards in one session, with
+  marker ID collision checking
+- **Intrinsic and extrinsic calibration** solved jointly in one optimisation
+- **Eight camera models**, including pinhole, fisheye, double sphere and FOV
+- **Three solver backends**: scipy, Ceres and GTSAM
+- **Uncertainty reporting** instead of a single RMS reprojection error
+- **Desktop GUI** built with PySide6, plus a headless command line
+
+Keywords: camera calibration, multi-camera calibration, multi-object
+calibration, stereo calibration, extrinsic calibration, intrinsic calibration,
+Charuco, ArUco, bundle adjustment, fisheye calibration, OpenCV, Python.
 
 ## Requirements
 
@@ -21,8 +38,8 @@ Clone the repository, create a virtual environment and install the
 dependencies:
 
 ```bash
-git clone https://github.com/ibird-bot/multi-object-calibration-tool.git
-cd multi-object-calibration-tool
+git clone https://github.com/ibird-bot/multi-object-camera-calibration-tool.git
+cd multi-object-camera-calibration-tool
 
 python -m venv .venv
 .venv\Scripts\activate            # Windows
@@ -50,9 +67,10 @@ The application opens on the Setup tab, where you declare your cameras and
 calibration boards. Detection, optimisation and the report follow in their own
 tabs.
 
-## Camera models
+## Supported camera models
 
-Eight models, each with analytic Jacobians checked against finite differences.
+Eight camera models, each with analytic Jacobians checked against finite
+differences.
 
 | Shown as | id | params | For |
 |---|---|---|---|
@@ -65,7 +83,7 @@ Eight models, each with analytic Jacobians checked against finite differences.
 | FOV | `fov` | 5 | One parameter: the lens field of view |
 | Halcon Division | `halcon_division` | 5 | One parameter, closed-form inverse |
 
-## Conventions
+## Coordinate conventions
 
 Stated explicitly, because getting these wrong is silent:
 

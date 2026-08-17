@@ -145,6 +145,52 @@ if pyceres is not None:
             return True
 
 
+def _write_state(problem: Problem, arrays: dict[str, np.ndarray]) -> None:
+    """Copy Ceres' parameter buffers back into the core problem's blocks."""
+    for key, blk in problem.blocks.items():
+        if blk.kind == POSE:
+            blk.value = np.concatenate([arrays[_t_key(key)], arrays[_q_key(key)]])
+        else:
+            blk.value = arrays[key].copy()
+
+
+def _make_history_callback(history, problem, arrays, watcher):
+    """
+    Record Ceres' per-iteration progress, since the summary will not.
+
+    pyceres 2.6 does not bind `Solver::Summary::iterations`, so the descent that
+    Ceres certainly computed is simply not reachable from the summary object --
+    checked against the installed binary, not assumed. `IterationCallback` is
+    bound and carries the same numbers, so the history is collected as the solve
+    runs instead. Without this the Ceres progress plot degenerates to a two-bar
+    before/after chart while scipy draws a curve, which makes the two backends
+    look different when only the reporting is.
+
+    The RMS costs a state sync: Ceres owns its own buffers and the core blocks
+    still hold the values from before the solve, so measuring without copying
+    first would report the starting error at every iteration -- a flat line that
+    looks like a solver doing nothing.
+    """
+
+    class _History(pyceres.IterationCallback):
+        def __call__(self, summary) -> int:  # pragma: no cover - needs pyceres
+            record = IterationRecord(
+                iteration=int(summary.iteration),
+                cost=float(summary.cost),
+                gradient_norm=float(summary.gradient_max_norm),
+                step_norm=float(summary.step_norm),
+            )
+            if watcher is not None:
+                _write_state(problem, arrays)
+                record.rms_px = per_corner_rms(problem)
+            history.append(record)
+            if watcher is not None:
+                watcher(record)
+            return pyceres.CallbackReturnType.SOLVER_CONTINUE
+
+    return _History()
+
+
 @register_backend
 class CeresBackend(SolverBackend):
     name = "ceres"
@@ -251,27 +297,22 @@ class CeresBackend(SolverBackend):
         if opts.get("use_inner_iterations"):
             so.use_inner_iterations = True
 
+        history: list[IterationRecord] = []
+        # Held in a local: Ceres keeps a raw pointer, and letting Python collect
+        # the callback mid-solve is a crash, not a missing log line.
+        callback = _make_history_callback(history, problem, arrays, opts.on_iteration)
+        so.callbacks = [callback]
+        # Without this the parameter buffers are only written at the end, so the
+        # per-iteration RMS would measure the starting point every time.
+        so.update_state_every_iteration = True
+
         summary = pyceres.SolverSummary()
         pyceres.solve(so, cp, summary)
 
         # ---- write the solution back into the core problem ---------------
-        for key, blk in problem.blocks.items():
-            if blk.kind == POSE:
-                blk.value = np.concatenate([arrays[_t_key(key)], arrays[_q_key(key)]])
-            else:
-                blk.value = arrays[key].copy()
+        _write_state(problem, arrays)
 
         r_final = problem.residuals_only()
-        history = [
-            IterationRecord(
-                iteration=int(getattr(it, "iteration", i)),
-                cost=float(getattr(it, "cost", np.nan)),
-                gradient_norm=float(getattr(it, "gradient_max_norm", np.nan)),
-                step_norm=float(getattr(it, "step_norm", np.nan)),
-            )
-            for i, it in enumerate(getattr(summary, "iterations", []) or [])
-        ]
-
         term = str(summary.termination_type)
         return SolveResult(
             backend=self.name,

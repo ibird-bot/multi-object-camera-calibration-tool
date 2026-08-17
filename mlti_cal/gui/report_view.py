@@ -30,8 +30,10 @@ from PySide6.QtWidgets import (
 )
 
 from mlti_cal.gui.session import ReportWorker, Session, run_in_thread
+from mlti_cal.gui.settings_panel import SettingsPanel
 from mlti_cal.gui.widgets import PlotCanvas
 from mlti_cal.io.config import export_json, export_opencv_yaml
+from mlti_cal.report.settings import REPORT_CATALOG, REPORT_SUMMARY, ReportSettings
 
 SEVERITY_COLOUR = {"critical": "#c0392b", "warning": "#c87f0a", "info": "#2d7d46"}
 
@@ -39,9 +41,14 @@ SEVERITY_COLOUR = {"critical": "#c0392b", "warning": "#c87f0a", "info": "#2d7d46
 class ReportView(QWidget):
     status = Signal(str)
 
-    def __init__(self, session: Session, parent=None):
+    def __init__(self, session: Session, console=None, parent=None):
         super().__init__(parent)
         self.session = session
+        # Shared with every other tab; a private one when built standalone.
+        from mlti_cal.gui.log_console import LogConsole, SourceLog
+
+        self.console = console if console is not None else LogConsole()
+        self.log = SourceLog(self.console, "report")
         self._build()
 
     def _build(self):
@@ -77,10 +84,22 @@ class ReportView(QWidget):
         bar.addWidget(self.camera_combo)
 
         bar.addStretch()
+        self.settings_btn = QPushButton("Thresholds...")
+        self.settings_btn.setCheckable(True)
+        self.settings_btn.setToolTip(
+            "Show the thresholds that decide which warnings fire. They change "
+            "what the report SAYS, never what was solved."
+        )
+        self.settings_btn.toggled.connect(self._toggle_settings)
+        bar.addWidget(self.settings_btn)
         export_btn = QPushButton("Export...")
         export_btn.clicked.connect(self._export)
         bar.addWidget(export_btn)
         root.addLayout(bar)
+
+        self.report_panel = SettingsPanel("Report thresholds", REPORT_SUMMARY, REPORT_CATALOG)
+        self.report_panel.setVisible(False)
+        root.addWidget(self.report_panel)
 
         split = QSplitter(Qt.Vertical)
         self.tabs = QTabWidget()
@@ -119,10 +138,21 @@ class ReportView(QWidget):
             QMessageBox.information(self, "Nothing to report", "Solve first.")
             return
         self.build_btn.setEnabled(False)
+        # The range spinbox in the toolbar and `default_range_m` in the panel
+        # are the same quantity; the toolbar one is what the user just touched,
+        # so it wins and the panel is kept in step rather than silently ignored.
+        settings = ReportSettings(**self.report_panel.values())
+        settings.default_range_m = self.range_spin.value()
         worker = ReportWorker(
-            self.session, self.range_spin.value(), self.crossval_check.isChecked()
+            self.session,
+            self.range_spin.value(),
+            self.crossval_check.isChecked(),
+            settings=settings,
         )
         run_in_thread(self, worker, self._on_report, self._on_failed, self.status.emit)
+
+    def _toggle_settings(self, shown: bool) -> None:
+        self.report_panel.setVisible(shown)
 
     def _on_report(self, report):
         self.build_btn.setEnabled(True)

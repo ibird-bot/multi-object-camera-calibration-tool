@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mlti_cal.report.settings import ReportSettings
+
 INFO, WARNING, CRITICAL = "info", "warning", "critical"
 
 
@@ -46,7 +48,9 @@ def collect_warnings(
     crossval=None,
     solve_result=None,
     num_frames: int = 0,
+    settings: ReportSettings | None = None,
 ) -> list[Warning_]:
+    cfg = settings or ReportSettings()
     w: list[Warning_] = []
 
     # -- solver --------------------------------------------------------
@@ -93,7 +97,7 @@ def collect_warnings(
                     "is a lower bound only.",
                 )
             )
-        elif covariance.condition_number > 1e8:
+        elif covariance.condition_number > cfg.condition_number_warn:
             w.append(
                 Warning_(
                     WARNING,
@@ -141,7 +145,9 @@ def collect_warnings(
                 )
             )
 
-        strong = covariance.top_correlations(k=3, threshold=0.98)
+        strong = covariance.top_correlations(
+            k=cfg.correlation_top_k, threshold=cfg.correlation_threshold
+        )
         if strong:
             pairs = "; ".join(f"{a} vs {b} ({c:+.3f})" for a, b, c in strong)
             w.append(
@@ -155,7 +161,7 @@ def collect_warnings(
             )
 
     # -- data quantity / coverage ---------------------------------------
-    if num_frames and num_frames < 8:
+    if num_frames and num_frames < cfg.min_frames_warn:
         w.append(
             Warning_(
                 WARNING,
@@ -167,7 +173,7 @@ def collect_warnings(
         )
     if coverage is not None:
         for cid, cs in coverage.per_camera.items():
-            if cs.occupied_fraction < 0.6:
+            if cs.occupied_fraction < cfg.min_occupied_fraction:
                 w.append(
                     Warning_(
                         WARNING,
@@ -189,7 +195,7 @@ def collect_warnings(
                         "corners are not supported by data.",
                     )
                 )
-        if coverage.tilt and coverage.tilt.fraction_below_10deg > 0.7:
+        if coverage.tilt and coverage.tilt.fraction_below_10deg > cfg.max_low_tilt_fraction:
             w.append(
                 Warning_(
                     WARNING,
@@ -216,7 +222,7 @@ def collect_warnings(
                     "error. Check the residual quiver plot for structure.",
                 )
             )
-    if outliers and outliers.get("fraction", 0.0) > 0.02:
+    if outliers and outliers.get("fraction", 0.0) > cfg.max_outlier_fraction:
         w.append(
             Warning_(
                 WARNING,

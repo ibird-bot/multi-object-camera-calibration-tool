@@ -117,11 +117,24 @@ class CalibrationSystem:
 
     # -- construction ------------------------------------------------------
     def add_camera(self, camera: Camera) -> Camera:
+        """
+        Add a camera, maintaining the invariant that EXACTLY ONE is reference.
+
+        The order of these branches matters. Unconditionally flagging the first
+        camera added -- the obvious implementation -- silently discards the
+        caller's choice: a config marking cam2 as reference would leave both
+        cam0 and cam2 flagged, `reference_camera` would return cam0, and the
+        rig origin would quietly be the wrong camera. No error, no rank
+        deficiency, just extrinsics reported against something the user did not
+        ask for.
+        """
         if camera.id in self.cameras:
             raise ValueError(f"duplicate camera id {camera.id!r}")
-        if not self.cameras:
-            camera.is_reference = True  # first camera added defines the rig
         self.cameras[camera.id] = camera
+        if camera.is_reference:
+            self.set_reference_camera(camera.id)  # clears any previous one
+        elif not any(c.is_reference for c in self.cameras.values()):
+            camera.is_reference = True  # first camera defaults to the rig frame
         return camera
 
     def add_board(self, board: Board) -> Board:
@@ -147,10 +160,19 @@ class CalibrationSystem:
     # -- queries -----------------------------------------------------------
     @property
     def reference_camera(self) -> str:
-        for cid, cam in self.cameras.items():
-            if cam.is_reference:
-                return cid
-        raise ValueError("no reference camera set")
+        refs = [cid for cid, cam in self.cameras.items() if cam.is_reference]
+        if not refs:
+            raise ValueError("no reference camera set")
+        if len(refs) > 1:
+            # Never silently pick one: the gauge would be fixed on a camera the
+            # caller did not choose, and every extrinsic would be reported
+            # against the wrong origin.
+            raise ValueError(
+                f"{len(refs)} cameras are marked as reference ({', '.join(refs)}). "
+                f"Exactly one camera defines the rig frame; use "
+                f"set_reference_camera() to choose."
+            )
+        return refs[0]
 
     def set_reference_camera(self, camera_id: str) -> None:
         if camera_id not in self.cameras:

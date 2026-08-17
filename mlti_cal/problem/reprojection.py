@@ -221,3 +221,47 @@ def write_back(system: CalibrationSystem, problem: Problem) -> None:
         cam.extrinsic = problem.blocks[extr_key(cid)].value.copy()
     for frame, board in system.frame_board_pairs:
         system.board_poses[(frame, board)] = problem.blocks[pose_key(frame, board)].value.copy()
+
+
+def snapshot_values(system: CalibrationSystem) -> dict[str, np.ndarray]:
+    """
+    Read the system's current values out into block-key form.
+
+    The inverse of `write_back`, and the reason it exists: `initialize_system`
+    and `write_back` mutate the same `cam.params` / `cam.extrinsic` /
+    `board_poses` fields, so a solve destroys the bootstrap estimate unless it
+    was copied out first. Copies are deep -- a snapshot that aliased the live
+    arrays would be silently rewritten by the very solve it exists to survive.
+    """
+    out: dict[str, np.ndarray] = {}
+    for cid, cam in system.cameras.items():
+        out[intr_key(cid)] = np.asarray(cam.params, dtype=float).copy()
+        out[extr_key(cid)] = np.asarray(cam.extrinsic, dtype=float).copy()
+    for frame, board in system.frame_board_pairs:
+        pose = system.board_poses.get((frame, board))
+        if pose is not None:
+            out[pose_key(frame, board)] = np.asarray(pose, dtype=float).copy()
+    return out
+
+
+def restore_values(system: CalibrationSystem, values: dict[str, np.ndarray]) -> int:
+    """
+    Push a `snapshot_values` dict back into the system. Returns blocks restored.
+
+    Keys absent from `values` are left alone rather than zeroed: a snapshot
+    taken before a cull is a superset, and one taken before a camera was added
+    is a subset. Neither should corrupt the system it is restored into.
+    """
+    n = 0
+    for cid, cam in system.cameras.items():
+        if (v := values.get(intr_key(cid))) is not None:
+            cam.params = np.asarray(v, dtype=float).copy()
+            n += 1
+        if (v := values.get(extr_key(cid))) is not None:
+            cam.extrinsic = np.asarray(v, dtype=float).copy()
+            n += 1
+    for frame, board in system.frame_board_pairs:
+        if (v := values.get(pose_key(frame, board))) is not None:
+            system.board_poses[(frame, board)] = np.asarray(v, dtype=float).copy()
+            n += 1
+    return n

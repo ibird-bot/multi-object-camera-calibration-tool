@@ -5,7 +5,8 @@ Every number the GUI shows comes from this same code path, so a CLI run and a
 GUI run cannot disagree. This is also what makes batch/CI calibration possible.
 
     mlti-cal backends                      what can actually run here
-    mlti-cal backends --describe ceres     the option catalog with guidance
+    mlti-cal backends --describe ceres     the solver option catalog with guidance
+    mlti-cal settings charuco             every Charuco detector knob, with guidance
     mlti-cal demo                          synthetic end-to-end + honesty check
     mlti-cal calibrate config.json         real images
     mlti-cal compare                       every backend on one problem
@@ -19,16 +20,20 @@ from pathlib import Path
 
 import numpy as np
 
+from mlti_cal.detectors.registry import implemented_kinds
 from mlti_cal.io.config import (
     CalibrationConfig,
     build_system_from_config,
     export_json,
     export_opencv_yaml,
 )
+from mlti_cal.options import render_options
 from mlti_cal.problem.initialize import initialize_system
 from mlti_cal.problem.loss import make_loss
 from mlti_cal.problem.reprojection import build_problem, extr_key, intr_key, pose_key, write_back
+from mlti_cal.problem.settings import INIT_CATALOG, INIT_SUMMARY
 from mlti_cal.report.report import build_report
+from mlti_cal.report.settings import REPORT_CATALOG, REPORT_SUMMARY
 from mlti_cal.solvers import SolveOptions, backend_status, get_backend
 from mlti_cal.solvers.catalog import CATALOG, describe
 
@@ -42,6 +47,34 @@ def _truth_blocks(gt) -> dict:
     for (frame, board), pose in gt.board_poses.items():
         out[pose_key(frame, board)] = pose
     return out
+
+
+#: Everything the GUI can change, printable from the terminal. Same catalogs
+#: the panels are built from, so the two cannot drift apart.
+SETTINGS_TOPICS = {
+    # One topic per IMPLEMENTED detector, named after the detector rather than
+    # after "detection": these are ArUco/Charuco parameters and always were, and
+    # a checkerboard detector will bring its own topic rather than inherit
+    # options that mean nothing to it.
+    **{kind.id: (kind.summary, kind.catalog) for kind in implemented_kinds()},
+    "initialization": (INIT_SUMMARY, INIT_CATALOG),
+    "report": (REPORT_SUMMARY, REPORT_CATALOG),
+}
+
+
+def cmd_settings(args) -> int:
+    topics = [args.topic] if args.topic else sorted(SETTINGS_TOPICS)
+    for name in topics:
+        if name not in SETTINGS_TOPICS:
+            print(
+                f"ERROR: unknown topic {name!r}; known: {sorted(SETTINGS_TOPICS)} "
+                f"(solver options live under `mlti-cal backends --describe`)",
+                file=sys.stderr,
+            )
+            return 2
+        summary, options = SETTINGS_TOPICS[name]
+        print(render_options(name, summary, options))
+    return 0
 
 
 def cmd_backends(args) -> int:
@@ -202,6 +235,15 @@ def build_parser() -> argparse.ArgumentParser:
             metavar=("KEY", "VALUE"),
             help="backend-specific option, repeatable",
         )
+
+    st = sub.add_parser("settings", help="every detection/bootstrap/report knob, with guidance")
+    st.add_argument(
+        "topic",
+        nargs="?",
+        choices=sorted(SETTINGS_TOPICS),
+        help="one topic; omit for all of them",
+    )
+    st.set_defaults(func=cmd_settings)
 
     b = sub.add_parser("backends", help="which solvers can run here")
     b.add_argument("--describe", metavar="BACKEND", help="print the option catalog")

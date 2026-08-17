@@ -42,6 +42,56 @@ def test_backend_status_reports_every_backend():
     assert "gtsam" in status, "the gtsam adapter must be listed even when unusable"
 
 
+@pytest.mark.parametrize("name", [n for n, (ok, _) in backend_status().items() if ok])
+def test_every_backend_reports_its_descent(name):
+    """
+    A backend that solves silently cannot be compared to one that does not.
+
+    pyceres 2.6 does not bind `Solver::Summary::iterations`, so reading the
+    history off the summary produced an empty list and the Ceres progress plot
+    collapsed to a before/after bar while scipy drew a curve -- the adapters
+    looked different when only the reporting was. Ceres now collects the same
+    numbers through an IterationCallback, and this asserts it keeps doing so.
+    """
+    _, _, problem = fresh_problem()
+    result = get_backend(name).solve(problem, SolveOptions(max_iterations=100))
+    costs = [h.cost for h in result.history if np.isfinite(h.cost)]
+    assert len(costs) >= 2, f"{name} reported {len(costs)} usable cost record(s)"
+    assert costs[-1] < costs[0], f"{name}: history does not descend"
+    assert result.iterations == len(result.history)
+
+
+@pytest.mark.parametrize("name", [n for n, (ok, _) in backend_status().items() if ok])
+def test_on_iteration_streams_a_measured_rms(name):
+    """
+    The live view must report MEASURED pixels, not cost dressed up as pixels.
+
+    Deriving RMS from cost is exact only under a trivial loss; under a robust
+    one the cost is weighted and the derived number flatters the fit by exactly
+    what the loss discounts. So each record carries an RMS the backend measured
+    at that step, and the last one must equal the RMS of the returned solution
+    -- if it does not, records are being emitted from a state the solver went on
+    to abandon.
+    """
+    _, _, problem = fresh_problem()
+    seen: list = []
+    result = get_backend(name).solve(
+        problem, SolveOptions(max_iterations=100, on_iteration=seen.append)
+    )
+    assert len(seen) >= 2, f"{name} streamed {len(seen)} record(s)"
+    assert all(np.isfinite(r.rms_px) for r in seen), f"{name}: an RMS was not measured"
+    assert seen[-1].rms_px == pytest.approx(result.final_rms_px, abs=1e-9)
+    assert seen[0].rms_px == pytest.approx(result.initial_rms_px, rel=1e-6)
+
+
+def test_no_watcher_means_no_rms_measurement_cost():
+    """The extra projection pass is for the live view only; headless pays nothing."""
+    _, _, problem = fresh_problem()
+    result = get_backend("scipy").solve(problem, SolveOptions(max_iterations=30))
+    assert result.history, "history is recorded either way"
+    assert all(not np.isfinite(h.rms_px) for h in result.history)
+
+
 @ceres_only
 def test_ceres_solves_and_reduces_cost():
     _, _, problem = fresh_problem()

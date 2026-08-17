@@ -27,6 +27,65 @@ from mlti_cal.models.manifolds import (
 )
 from mlti_cal.problem.types import Board, CalibrationSystem, Camera, Observation
 
+#: Ground-truth distortion per model, for the models OpenCV cannot fit.
+#:
+#: Values sit in each model's own well-behaved range rather than at a token
+#: small number: a synthetic camera with near-zero distortion cannot show
+#: whether the model recovers distortion at all, which is the one thing an
+#: end-to-end test of a new model needs to prove.
+_TRUTH_DISTORTION: dict[str, tuple[float, ...]] = {
+    "double_sphere": (-0.17, 0.56),  # xi, alpha
+    "eucm": (0.60, 1.10),  # alpha, beta
+    "fov": (0.85,),  # w, radians
+    "halcon_division": (-0.10,),  # kappa
+    "matlab": (0.0, -0.26, 0.09, -0.015, 8e-4, -6e-4),  # skew, k1..k3, p1, p2
+    "thin_prism": (
+        -0.26,
+        0.09,
+        8e-4,
+        -6e-4,
+        -0.015,
+        1e-3,
+        -4e-4,
+        1e-4,
+        2e-4,
+        -8e-5,
+        1.5e-4,
+        -1e-4,
+    ),  # fmt: skip
+}
+
+#: Focal length appropriate to each model's geometry. The projective models
+#: (double sphere, EUCM, FOV) compress a wide field into the same sensor, so a
+#: pinhole-sized focal length would put every board corner off the image.
+_TRUTH_FOCAL: dict[str, float] = {
+    "double_sphere": 360.0,
+    "eucm": 370.0,
+    "fov": 520.0,
+    "halcon_division": 820.0,
+    "matlab": 900.0,
+    "thin_prism": 900.0,
+}
+
+
+def _truth_for(model_name: str, w: int, h: int, rng) -> np.ndarray:
+    """Ground-truth intrinsics for a model with no OpenCV reference fit."""
+    if model_name not in _TRUTH_DISTORTION:
+        raise KeyError(
+            f"no synthetic ground truth for camera model {model_name!r}; add one to "
+            f"_TRUTH_DISTORTION so the model can be exercised end to end"
+        )
+    f = _TRUTH_FOCAL[model_name]
+    return np.array(
+        [
+            f + 0.02 * f * rng.standard_normal(),
+            f + 0.02 * f * rng.standard_normal(),
+            w / 2 + 8.0 * rng.standard_normal(),
+            h / 2 + 8.0 * rng.standard_normal(),
+            *_TRUTH_DISTORTION[model_name],
+        ]
+    )
+
 
 def charuco_object_points(squares_x: int, squares_y: int, square_length: float) -> np.ndarray:
     """
@@ -118,7 +177,7 @@ def generate_dataset(
                     -0.015 + 5e-3 * rng.standard_normal(),
                 ]
             )
-        else:
+        elif model_name == "fisheye_kb":
             true_params = np.array(
                 [
                     420.0 + 15.0 * rng.standard_normal(),
@@ -131,6 +190,8 @@ def generate_dataset(
                     2e-4,
                 ]
             )
+        else:
+            true_params = _truth_for(model_name, w, h, rng)
         gt.camera_params[cid] = true_params
 
         # cam0 defines the rig; the others sit on a baseline looking inward.

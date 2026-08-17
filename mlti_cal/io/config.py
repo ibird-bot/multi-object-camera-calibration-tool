@@ -12,14 +12,21 @@ parameter order.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from mlti_cal.detectors.charuco import CharucoBoardSpec, MultiBoardDetector
+from mlti_cal.detectors.charuco import CharucoBoardSpec, Detection, MultiBoardDetector
+from mlti_cal.detectors.registry import (
+    default_detector_settings,
+    detector_settings_from_dict,
+    detector_settings_to_dict,
+)
 from mlti_cal.models.manifolds import pose_to_rt, quat_to_matrix
+from mlti_cal.problem.settings import InitSettings
 from mlti_cal.problem.types import Board, CalibrationSystem, Camera, Observation
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
@@ -34,14 +41,51 @@ class CameraConfig:
     is_reference: bool = False
 
 
+def _load_detectors(data: dict) -> dict:
+    """
+    Per-kind detector settings from raw JSON.
+
+    Accepts the older flat `"detection"` block, which predates there being more
+    than one detector kind, and files it under charuco -- which is what it
+    always described.
+    """
+    if "detectors" in data:
+        return detector_settings_from_dict(data["detectors"])
+    if "detection" in data:
+        return detector_settings_from_dict({"charuco": data["detection"]})
+    return default_detector_settings()
+
+
+def _load_noise(data: dict) -> float | None:
+    """`pixel_noise_std` from raw JSON: absent -> default, null -> unknown."""
+    if "pixel_noise_std" not in data:
+        return 0.3
+    value = data["pixel_noise_std"]
+    return None if value is None else float(value)
+
+
 @dataclass
 class CalibrationConfig:
     """The whole project definition."""
 
     cameras: list[CameraConfig] = field(default_factory=list)
     boards: list[dict] = field(default_factory=list)
-    pixel_noise_std: float = 0.3
+    #: Assumed per-coordinate corner noise in pixels, or None for "unknown".
+    #: None is a real answer, not a missing value: you often do not know it, and
+    #: inventing 0.3 px would put a number you never measured into the whitening
+    #: and into the covariance cross-check. When it is None the residuals are
+    #: left unweighted and the covariance takes its sigma from the residuals,
+    #: which it already does by default.
+    pixel_noise_std: float | None = 0.3
     name: str = "calibration"
+    #: Detector knobs, keyed by detector kind ("charuco", ...). Per KIND
+    #: because the settings are properties of a detector, not of detection in
+    #: general: `error_correction_rate` is meaningless to a checkerboard.
+    #: Saved in full -- including values left at their defaults -- because a
+    #: config recording only the overrides silently changes meaning when a
+    #: default changes, and a calibration you cannot reproduce is not a result.
+    detectors: dict = field(default_factory=default_detector_settings)
+    initialization: InitSettings = field(default_factory=InitSettings)
 
     @staticmethod
     def load(path: str | Path) -> CalibrationConfig:
@@ -49,8 +93,14 @@ class CalibrationConfig:
         return CalibrationConfig(
             cameras=[CameraConfig(**c) for c in data.get("cameras", [])],
             boards=data.get("boards", []),
-            pixel_noise_std=float(data.get("pixel_noise_std", 0.3)),
+            # Three cases, and they are genuinely different: key absent means an
+            # older config that predates the choice, so it keeps the old default;
+            # an explicit null means the user said they do not know; a number
+            # means they do.
+            pixel_noise_std=_load_noise(data),
             name=data.get("name", "calibration"),
+            detectors=_load_detectors(data),
+            initialization=InitSettings.from_dict(data.get("initialization")),
         )
 
     def save(self, path: str | Path) -> Path:
@@ -63,6 +113,8 @@ class CalibrationConfig:
                     "pixel_noise_std": self.pixel_noise_std,
                     "cameras": [asdict(c) for c in self.cameras],
                     "boards": self.boards,
+                    "detectors": detector_settings_to_dict(self.detectors),
+                    "initialization": self.initialization.to_dict(),
                 },
                 indent=2,
             ),
@@ -70,8 +122,37 @@ class CalibrationConfig:
         )
         return p
 
+    @property
+    def charuco(self):
+        """Charuco detector settings -- the only kind implemented today."""
+        return self.detectors["charuco"]
+
     def board_specs(self) -> list[CharucoBoardSpec]:
         return [CharucoBoardSpec(**b) for b in self.boards]
+
+
+@dataclass
+class ImageProgress:
+    """
+    One detection event, reported per image as the run proceeds.
+
+    Deliberately a plain dataclass and a plain callable: this is the core, and
+    the core imports no Qt. The GUI adapts it to signals at its own boundary.
+
+    `image` is the grayscale frame that was just searched, handed over so a
+    viewer can draw the corners without decoding the file a second time. It is
+    None only when the file could not be read.
+    """
+
+    camera: str
+    path: Path
+    stage: str  # "start" before the file is read, "done" after it is searched
+    image: np.ndarray | None = None
+    detections: tuple[Detection, ...] = ()
+
+    @property
+    def num_corners(self) -> int:
+        return sum(d.num_points for d in self.detections)
 
 
 def find_images(directory: str | Path) -> list[Path]:
@@ -83,7 +164,9 @@ def find_images(directory: str | Path) -> list[Path]:
 
 
 def build_system_from_config(
-    config: CalibrationConfig, verbose: bool = False
+    config: CalibrationConfig,
+    verbose: bool = False,
+    on_image: Callable[[ImageProgress], None] | None = None,
 ) -> tuple[CalibrationSystem, dict]:
     """
     Run detection over every camera's images and assemble a CalibrationSystem.
@@ -92,9 +175,20 @@ def build_system_from_config(
     requires synchronised capture, and the filename is the only synchronisation
     signal available from a directory of images -- so a mismatch is reported
     rather than silently producing a rig where cameras see different instants.
+
+    `on_image` is called twice per image, "start" then "done", so a caller can
+    show which file is being searched and what was found in it. The pairing is
+    unconditional within a run -- an unreadable file still gets its "done", with
+    no image and no detections -- because a UI that marks an image as in-flight
+    on "start" would otherwise leave it marked forever. The pairing is broken
+    only by an exception, which aborts the whole run and is the caller's cue to
+    clear the display.
     """
     specs = config.board_specs()
-    detector = MultiBoardDetector(specs)  # validates ID collisions
+    # Charuco is the only implemented kind, so every board spec is one; when a
+    # second kind lands, the specs get grouped by kind and each group goes to
+    # its own detector with its own settings.
+    detector = MultiBoardDetector(specs, settings=config.charuco)  # validates ID collisions
     system = CalibrationSystem()
 
     for spec in specs:
@@ -137,9 +231,13 @@ def build_system_from_config(
         found_frames: set[str] = set()
         n_det = 0
         for img_path in images:
+            if on_image is not None:
+                on_image(ImageProgress(camera=cam_cfg.id, path=img_path, stage="start"))
             img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
             if img is None:
                 stats["skipped"].append(str(img_path))
+                if on_image is not None:
+                    on_image(ImageProgress(camera=cam_cfg.id, path=img_path, stage="done"))
                 continue
             if (img.shape[1], img.shape[0]) != size:
                 raise ValueError(
@@ -148,7 +246,8 @@ def build_system_from_config(
                     f"{size[0]}x{size[1]}. Mixed resolutions cannot share intrinsics."
                 )
             frame = img_path.stem
-            for det in detector.detect_all(img):
+            dets = detector.detect_all(img)
+            for det in dets:
                 system.add_observation(
                     Observation(
                         frame=frame,
@@ -156,11 +255,21 @@ def build_system_from_config(
                         board=det.board_id,
                         point_ids=det.point_ids,
                         image_points=det.image_points,
-                        sigma=config.pixel_noise_std,
+                        sigma=1.0 if config.pixel_noise_std is None else config.pixel_noise_std,
                     )
                 )
                 found_frames.add(frame)
                 n_det += 1
+            if on_image is not None:
+                on_image(
+                    ImageProgress(
+                        camera=cam_cfg.id,
+                        path=img_path,
+                        stage="done",
+                        image=img,
+                        detections=tuple(dets),
+                    )
+                )
             if verbose:
                 print(f"  {cam_cfg.id}/{img_path.name}: {n_det} detections so far")
         frames_by_camera[cam_cfg.id] = found_frames
@@ -179,8 +288,12 @@ def build_system_from_config(
                 "filename stem; rename synchronised captures to share a stem "
                 "(e.g. cam0/0001.png and cam1/0001.png)."
             )
-    if any(c.is_reference for c in config.cameras) is False and system.cameras:
+    # `add_camera` already maintains the one-reference invariant, including
+    # honouring an explicitly flagged non-first camera. Only the all-unflagged
+    # case needs a default.
+    if system.cameras and not any(c.is_reference for c in system.cameras.values()):
         system.set_reference_camera(next(iter(system.cameras)))
+    stats["reference_camera"] = system.reference_camera if system.cameras else None
     return system, stats
 
 

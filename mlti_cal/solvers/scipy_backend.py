@@ -85,9 +85,8 @@ class ScipyBackend(SolverBackend):
         # small. Above the threshold the dense factorisation is the thing that
         # would blow up, and 'lsmr' becomes correct.
         n_free_est = problem.num_free_params
-        default_tr = (
-            None if method == "lm" else ("exact" if n_free_est <= DENSE_COLUMN_LIMIT else "lsmr")
-        )
+        dense_limit = int(opts.get("dense_column_limit", DENSE_COLUMN_LIMIT))
+        default_tr = None if method == "lm" else ("exact" if n_free_est <= dense_limit else "lsmr")
         tr_solver = opts.get("tr_solver", default_tr)
         x_scale = opts.get("x_scale", "jac")
         dense_jac = method == "lm" or tr_solver == "exact"
@@ -119,10 +118,21 @@ class ScipyBackend(SolverBackend):
 
         state: dict = {"deltas": None}
 
+        watcher = opts.on_iteration
+
         def fun(x: np.ndarray) -> np.ndarray:
             state["deltas"] = problem.set_from_base(base_state, x)
             r = problem.residuals_only()
-            history.append(IterationRecord(len(history), 0.5 * float(r @ r)))
+            record = IterationRecord(len(history), 0.5 * float(r @ r))
+            if watcher is not None:
+                # A second projection pass, paid only when a live view asked for
+                # it. Measured rather than derived from the cost: under a robust
+                # loss the cost is weighted and would report a fit better than
+                # the one the pixels show.
+                record.rms_px = per_corner_rms(problem)
+            history.append(record)
+            if watcher is not None:
+                watcher(record)
             return r
 
         def jac(x: np.ndarray):

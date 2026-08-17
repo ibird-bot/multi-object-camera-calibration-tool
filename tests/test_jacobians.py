@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from mlti_cal.models.camera import FisheyeKB, PinholeRadTan, available_models, get_model
+from mlti_cal.models.camera import available_models, get_model
 from mlti_cal.models.manifolds import (
     d_point_d_pose_tangent,
     matrix_to_quat,
@@ -166,12 +166,58 @@ def test_translation_columns_are_not_r_left_r_pose():
 # ---------------------------------------------------------------------------
 
 
+#: Plausible values per model, in the model's OWN parameter order.
+#:
+#: These are deliberately not near-zero. A Jacobian bug in a distortion term is
+#: invisible when that term is 0 -- its column is then correct by accident --
+#: so every coefficient here is far enough from zero to exercise its own
+#: derivative and its coupling into the others.
+REALISTIC_PARAMS = {
+    "pinhole_radtan": [900.0, 905.0, 640.0, 360.0, -0.28, 0.11, 1e-3, -8e-4, -0.02],
+    "fisheye_kb": [420.0, 421.0, 640.0, 360.0, -0.02, 3e-3, -1e-3, 2e-4],
+    # xi and alpha both well inside (0,1): a real fisheye sits around here.
+    "double_sphere": [350.0, 351.0, 640.0, 360.0, -0.18, 0.58],
+    "eucm": [360.0, 362.0, 640.0, 360.0, 0.62, 1.15],
+    "thin_prism": [
+        900.0,
+        905.0,
+        640.0,
+        360.0,
+        -0.28,
+        0.11,
+        1e-3,
+        -8e-4,
+        -0.02,
+        1e-3,
+        -5e-4,
+        2e-4,
+        3e-4,
+        -1e-4,
+        2e-4,
+        -1.5e-4,
+    ],  # fmt: skip
+    "matlab": [900.0, 905.0, 640.0, 360.0, 0.7, -0.28, 0.11, -0.02, 1e-3, -8e-4],
+    "fov": [500.0, 502.0, 640.0, 360.0, 0.92],
+    "halcon_division": [800.0, 802.0, 640.0, 360.0, -0.11],
+}
+
+
 def realistic_params(model):
-    if isinstance(model, PinholeRadTan):
-        return np.array([900.0, 905.0, 640.0, 360.0, -0.28, 0.11, 1e-3, -8e-4, -0.02])
-    if isinstance(model, FisheyeKB):
-        return np.array([420.0, 421.0, 640.0, 360.0, -0.02, 3e-3, -1e-3, 2e-4])
-    raise AssertionError(f"no params for {model}")
+    if model.name not in REALISTIC_PARAMS:
+        raise AssertionError(
+            f"no test parameters for {model.name!r}. Every registered model must "
+            f"have them, or it is silently untested."
+        )
+    p = np.array(REALISTIC_PARAMS[model.name], dtype=float)
+    assert p.size == model.num_params, (
+        f"{model.name}: {p.size} test parameters for {model.num_params} model parameters"
+    )
+    return p
+
+
+def test_every_registered_model_is_covered():
+    """A model with no entry above would be parametrized but never exercised."""
+    assert set(available_models()) == set(REALISTIC_PARAMS)
 
 
 @pytest.mark.parametrize("name", available_models())

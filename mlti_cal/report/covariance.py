@@ -126,7 +126,7 @@ class CovarianceResult:
 
 def compute_covariance(
     problem: Problem,
-    pixel_noise_std: float = 0.3,
+    pixel_noise_std: float | None = 0.3,
     rank_threshold: float = 1e-8,
     disagreement_factor: float = 2.0,
     sigma_source: str = "residual",
@@ -153,8 +153,18 @@ def compute_covariance(
         )
 
     sigma2_residual = float(r @ r) / dof
-    sigma2_assumed = float(pixel_noise_std) ** 2
-    ratio = max(sigma2_residual, sigma2_assumed) / max(min(sigma2_residual, sigma2_assumed), 1e-300)
+    # None means the user does not claim to know the noise. There is then
+    # nothing to cross-check against, so the comparison is nan rather than a
+    # comparison against an invented default -- and nan fails the `> factor`
+    # test below, so no mismatch is reported for a claim nobody made.
+    if pixel_noise_std is None:
+        sigma2_assumed = float("nan")
+        ratio = float("nan")
+    else:
+        sigma2_assumed = float(pixel_noise_std) ** 2
+        ratio = max(sigma2_residual, sigma2_assumed) / max(
+            min(sigma2_residual, sigma2_assumed), 1e-300
+        )
     sigma2_used = sigma2_residual if sigma_source == "residual" else sigma2_assumed
 
     # SVD of J rather than eigendecomposition of J^T J: squaring the matrix

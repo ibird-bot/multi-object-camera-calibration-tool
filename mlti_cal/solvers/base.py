@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -29,6 +30,12 @@ class SolveOptions:
     num_threads: int = 1
     verbose: bool = False
     extra: dict = field(default_factory=dict)
+    #: Called with each `IterationRecord` as the solve runs, for a live view.
+    #: Setting it also asks the backend to MEASURE the per-corner RMS at every
+    #: step, which costs an extra projection pass -- speed traded for visibility,
+    #: and only when somebody is actually watching. Headless solves leave it None
+    #: and pay nothing.
+    on_iteration: Callable[[IterationRecord], None] | None = None
 
     def get(self, key: str, default=None):
         return self.extra.get(key, default)
@@ -40,6 +47,11 @@ class IterationRecord:
     cost: float
     gradient_norm: float = float("nan")
     step_norm: float = float("nan")
+    #: Per-corner reprojection RMS in PIXELS, measured -- never derived from
+    #: `cost`. The two agree only under a trivial loss; under a robust one the
+    #: cost is weighted and converting it would overstate the fit by exactly
+    #: the amount the loss is discounting.
+    rms_px: float = float("nan")
 
 
 @dataclass

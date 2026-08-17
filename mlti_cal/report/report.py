@@ -24,6 +24,7 @@ from mlti_cal.report import coverage as coverage_mod
 from mlti_cal.report import residuals as residual_mod
 from mlti_cal.report import warnings as warn_mod
 from mlti_cal.report.covariance import CovarianceResult, compute_covariance
+from mlti_cal.report.settings import ReportSettings
 from mlti_cal.report.uncertainty import (
     UncertaintyMap,
     parameter_error_vs_uncertainty,
@@ -123,12 +124,21 @@ class CalibrationReport:
             )
             add(f"  condition number: {c.condition_number:.3e}")
             add(f"  dof             : {c.degrees_of_freedom}")
-            add(
-                f"  sigma (residual): {c.sigma2_residual**0.5:.4f} px   "
-                f"sigma (assumed): {c.sigma2_assumed**0.5:.4f} px   "
-                f"factor {c.noise_disagreement:.2f}"
-                + ("   <-- MISMATCH" if c.noise_disagreement_flagged else "")
-            )
+            if np.isnan(c.sigma2_assumed):
+                # No assumed noise was stated, so there is nothing to disagree
+                # with. Saying "assumed: nan" would read as a broken number
+                # rather than as a question the user declined to answer.
+                add(
+                    f"  sigma (residual): {c.sigma2_residual**0.5:.4f} px   "
+                    f"sigma (assumed): not stated -- no cross-check performed"
+                )
+            else:
+                add(
+                    f"  sigma (residual): {c.sigma2_residual**0.5:.4f} px   "
+                    f"sigma (assumed): {c.sigma2_assumed**0.5:.4f} px   "
+                    f"factor {c.noise_disagreement:.2f}"
+                    + ("   <-- MISMATCH" if c.noise_disagreement_flagged else "")
+                )
             add("  weakest directions:")
             for wd in c.weak_directions[:4]:
                 add(f"      {wd.describe()}")
@@ -207,13 +217,14 @@ def build_report(
     problem: Problem,
     system: CalibrationSystem,
     solve_result: SolveResult | None = None,
-    pixel_noise_std: float = 0.3,
+    pixel_noise_std: float | None = 0.3,
     uncertainty_ranges: dict[str, float] | None = None,
-    default_range_m: float = 1.5,
+    default_range_m: float | None = None,
     do_crossval: bool = False,
-    crossval_folds: int = 4,
+    crossval_folds: int | None = None,
     truth_values: dict | None = None,
-    grid_step: int = 32,
+    grid_step: int | None = None,
+    settings: ReportSettings | None = None,
 ) -> CalibrationReport:
     """
     Assemble the full report.
@@ -224,6 +235,13 @@ def build_report(
         truth_values: block key -> true value. Enables the ground-truth
             coverage check; synthetic data only.
     """
+    cfg = settings or ReportSettings()
+    # The loose keyword arguments predate ReportSettings and still win when
+    # passed, so existing callers and tests keep working unchanged.
+    default_range_m = cfg.default_range_m if default_range_m is None else default_range_m
+    crossval_folds = cfg.crossval_folds if crossval_folds is None else crossval_folds
+    grid_step = cfg.grid_step if grid_step is None else grid_step
+
     cov = None
     try:
         cov = compute_covariance(problem, pixel_noise_std=pixel_noise_std)
@@ -232,7 +250,7 @@ def build_report(
 
     stats = residual_mod.compute_residual_stats(problem)
     norm = residual_mod.normality(stats)
-    outl = residual_mod.find_outliers(stats)
+    outl = residual_mod.find_outliers(stats, k=cfg.outlier_k)
     cov_report = coverage_mod.compute_coverage_report(system)
 
     ref_cam = next(iter(system.cameras.values()))
@@ -296,6 +314,7 @@ def build_report(
         crossval=cv_obj,
         solve_result=solve_result,
         num_frames=len(system.frames),
+        settings=cfg,
     )
 
     return CalibrationReport(

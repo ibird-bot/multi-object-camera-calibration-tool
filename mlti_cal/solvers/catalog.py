@@ -17,32 +17,64 @@ so, because a measured claim and a quoted claim deserve different trust.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from mlti_cal.options import Option, render_options
 
+__all__ = [
+    "CATALOG",
+    "COMMON_OPTIONS",
+    "LOSS_CATALOG",
+    "Option",
+    "describe",
+    "options_for",
+    "to_dict",
+]
 
-@dataclass
-class Option:
-    name: str
-    kind: str  # "choice" | "int" | "float" | "bool"
-    default: Any
-    when: str
-    choices: list[str] = field(default_factory=list)
-    minimum: float | None = None
-    maximum: float | None = None
-    per_choice: dict[str, str] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return {
-            "name": self.name,
-            "kind": self.kind,
-            "default": self.default,
-            "when": self.when,
-            "choices": self.choices,
-            "min": self.minimum,
-            "max": self.maximum,
-            "per_choice": self.per_choice,
-        }
+#: Options every backend honours, held on `SolveOptions` itself rather than in
+#: `extra`. They were wired to both adapters from the start but appeared in no
+#: catalog, so nothing rendered them and they could not be changed from the GUI.
+COMMON_OPTIONS: list[Option] = [
+    Option(
+        name="function_tolerance",
+        kind="float",
+        default=1e-10,
+        minimum=1e-16,
+        maximum=1e-2,
+        when="Stop when the relative cost decrease falls below this. The usual reason "
+        "a solve stops 'early'. The default is deliberately tight -- calibration is "
+        "cheap and a premature stop hides in the report as a plausible RMS.",
+    ),
+    Option(
+        name="gradient_tolerance",
+        kind="float",
+        default=1e-12,
+        minimum=1e-20,
+        maximum=1e-2,
+        when="Stop when the largest gradient component falls below this -- i.e. the "
+        "point is stationary. Loosen it if the solver grinds through iterations "
+        "that no longer change the RMS.",
+    ),
+    Option(
+        name="parameter_tolerance",
+        kind="float",
+        default=1e-10,
+        minimum=1e-16,
+        maximum=1e-2,
+        when="Stop when the step becomes this small relative to the parameters. "
+        "Beware: focal lengths are O(1000) and distortion coefficients O(0.01), so "
+        "one shared relative tolerance means very different absolute precision.",
+    ),
+    Option(
+        name="num_threads",
+        kind="int",
+        default=1,
+        minimum=1,
+        maximum=64,
+        when="Threads for Jacobian evaluation and the linear solve. Honoured by Ceres "
+        "only; scipy and the GTSAM adapter ignore it. 1 by default so a run is bit-"
+        "for-bit reproducible -- raise it for large rigs and accept that "
+        "floating-point summation order, and so the last digits, may change.",
+    ),
+]
 
 
 CATALOG: dict[str, dict] = {
@@ -94,6 +126,18 @@ CATALOG: dict[str, dict] = {
                 when="'jac' rescales variables by Jacobian magnitude. Keep it: focal "
                 "lengths are O(1000) and distortion coefficients O(0.01), and "
                 "without scaling the trust region is dominated by the focal terms.",
+            ),
+            Option(
+                name="dense_column_limit",
+                kind="int",
+                default=2000,
+                minimum=1,
+                maximum=1000000,
+                when="Free-parameter count below which 'exact' is chosen automatically "
+                "when tr_solver is left at its default. Raise it to force a dense "
+                "factorisation on a bigger rig -- worth trying if a large solve "
+                "stalls, since 'lsmr' stalling is the failure measured above -- and "
+                "lower it if a dense Jacobian exhausts memory.",
             ),
             Option(
                 name="max_iterations",
@@ -247,26 +291,46 @@ LOSS_CATALOG = [
 ]
 
 
+#: Which COMMON options each backend actually READS, verified against the
+#: adapters rather than assumed. scipy passes ftol/gtol/xtol to
+#: `least_squares` but has no thread count; the GTSAM adapter sets only a
+#: relative error tolerance.
+#:
+#: This is not tidiness. Rendering `num_threads` next to scipy shows a control
+#: that silently does nothing, which is precisely the kind of quiet lie the
+#: rest of this project exists to remove.
+HONOURED_COMMON: dict[str, tuple[str, ...]] = {
+    "scipy": ("function_tolerance", "gradient_tolerance", "parameter_tolerance"),
+    "ceres": (
+        "function_tolerance",
+        "gradient_tolerance",
+        "parameter_tolerance",
+        "num_threads",
+    ),
+    "gtsam": ("function_tolerance",),
+}
+
+
+def options_for(backend: str) -> list[Option]:
+    """Every option this backend reads: its own, then the common ones it honours."""
+    if backend not in CATALOG:
+        raise KeyError(f"unknown backend {backend!r}; known: {sorted(CATALOG)}")
+    honoured = HONOURED_COMMON.get(backend, ())
+    return list(CATALOG[backend]["options"]) + [o for o in COMMON_OPTIONS if o.name in honoured]
+
+
 def describe(backend: str) -> str:
     """Human-readable rendering, used by `mlti-cal backends --describe`."""
     if backend not in CATALOG:
         raise KeyError(f"unknown backend {backend!r}; known: {sorted(CATALOG)}")
-    entry = CATALOG[backend]
-    lines = [f"=== {backend} ===", entry["summary"], ""]
-    for opt in entry["options"]:
-        lines.append(f"  {opt.name}  [{opt.kind}]  default={opt.default!r}")
-        lines.append(f"      {opt.when}")
-        for choice, note in opt.per_choice.items():
-            lines.append(f"        - {choice}: {note}")
-        lines.append("")
-    return "\n".join(lines)
+    return render_options(backend, CATALOG[backend]["summary"], options_for(backend))
 
 
 def to_dict() -> dict:
     return {
         name: {
             "summary": entry["summary"],
-            "options": [o.to_dict() for o in entry["options"]],
+            "options": [o.to_dict() for o in options_for(name)],
         }
         for name, entry in CATALOG.items()
     }

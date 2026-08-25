@@ -26,26 +26,15 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from mlti_cal.detectors.settings import CharucoSettings
+from mlti_cal.detectors.base import Detection, draw_detections  # noqa: F401  (re-export)
+from mlti_cal.detectors.masking import MaskGeometry
+from mlti_cal.detectors.registry import DetectorKind, register_detector
+from mlti_cal.detectors.settings import CHARUCO_CATALOG, CHARUCO_SUMMARY, CharucoSettings
+from mlti_cal.options import Option
 
 DICTIONARIES = {
     name: getattr(cv2.aruco, name) for name in dir(cv2.aruco) if name.startswith("DICT_")
 }
-
-
-@dataclass
-class Detection:
-    """One board found in one image."""
-
-    board_id: str
-    point_ids: np.ndarray  # (K,) charuco corner ids
-    image_points: np.ndarray  # (K,2) subpixel corners
-    marker_ids: np.ndarray | None = None
-    num_markers: int = 0
-
-    @property
-    def num_points(self) -> int:
-        return int(self.point_ids.size)
 
 
 @dataclass
@@ -89,6 +78,22 @@ class CharucoBoardSpec:
     @property
     def num_corners(self) -> int:
         return (self.squares_x - 1) * (self.squares_y - 1)
+
+    @property
+    def outline_object_points(self) -> np.ndarray:
+        """
+        (4,2) outer corners of the PRINTED board, in board coordinates.
+
+        Measured against the installed OpenCV rather than assumed:
+        `getChessboardCorners` puts the board origin at the outer corner, so
+        interior corners span [square_length, (squares-1) * square_length] while
+        the printed sheet spans [0, squares * square_length]. The gap of one
+        square on every side is exactly what a hull of detected corners misses,
+        and it is where a chessboard detector finds its false positives.
+        """
+        w = self.squares_x * self.square_length
+        h = self.squares_y * self.square_length
+        return np.array([[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], dtype=float)
 
 
 class CharucoDetector:
@@ -141,10 +146,26 @@ class CharucoDetector:
         """(M,3) chessboard corners in the board frame, indexed by corner id."""
         return np.asarray(self.board.getChessboardCorners(), dtype=float).reshape(-1, 3)
 
-    def detect(self, image: np.ndarray, min_corners: int | None = None) -> Detection | None:
-        """`min_corners` defaults to the value in `settings`; pass one to override."""
-        if min_corners is None:
-            min_corners = self.settings.min_corners
+    @property
+    def mask_geometry(self) -> MaskGeometry:
+        """What another detector needs to paint this board out of an image."""
+        return MaskGeometry(
+            object_points=self.object_points,
+            outline=self.spec.outline_object_points,
+            pitch=self.spec.square_length,
+        )
+
+    def detect(self, image: np.ndarray) -> Detection | None:
+        """
+        `detect(image)` and nothing else -- the same signature every detector has.
+
+        `min_corners` used to be an override parameter here, threaded down from
+        `BoardDetectors.detect` through `detect_all`. Nothing ever passed it, so
+        all three layers only ever forwarded None to this line. It is read from
+        the settings, where it is a documented catalog knob, and the uniform
+        one-argument signature is what a third-party detector has to match.
+        """
+        min_corners = self.settings.min_corners
         gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         corners, ids, marker_corners, marker_ids = self._detector.detectBoard(gray)
         n_markers = 0 if marker_ids is None else int(np.asarray(marker_ids).size)
@@ -162,6 +183,7 @@ class CharucoDetector:
             image_points=corners,
             marker_ids=None if marker_ids is None else np.asarray(marker_ids).reshape(-1),
             num_markers=0 if marker_ids is None else int(np.asarray(marker_ids).size),
+            kind="charuco",
         )
 
     def _warn_if_grid_looks_transposed(self, n_markers: int, n_corners: int) -> None:
@@ -248,53 +270,106 @@ class MultiBoardDetector:
     def object_points(self, board_id: str) -> np.ndarray:
         return self.detectors[board_id].object_points
 
-    def detect_all(self, image: np.ndarray, min_corners: int | None = None) -> list[Detection]:
+    @property
+    def mask_geometry(self) -> dict[str, MaskGeometry]:
+        """
+        Every board this group knows, keyed by id.
+
+        Coded boards need this as much as uncoded ones do -- they are the FIRST
+        thing painted out, because they are what an uncoded detector is most
+        likely to mistake for its own target.
+        """
+        return {bid: d.mask_geometry for bid, d in self.detectors.items()}
+
+    def detect_all(self, image: np.ndarray) -> list[Detection]:
         out = []
         for det in self.detectors.values():
-            d = det.detect(image, min_corners=min_corners)
+            d = det.detect(image)
             if d is not None:
                 out.append(d)
         return out
 
 
-def draw_detections(
-    image: np.ndarray,
-    detections: list[Detection],
-    radius: int = 4,
-    labels: bool = True,
-    colour: tuple[int, int, int] | None = None,
-) -> np.ndarray:
-    """
-    Overlay detected corners -- used by the GUI detection view.
-
-    `labels` and `colour` exist for the thumbnail-sized overlay. At 128 px the
-    per-corner id text is an unreadable smear that hides the corners it
-    annotates, and a fixed colour is wanted there so "has corners" reads at a
-    glance; the full-size preview keeps the per-board palette, which is what
-    tells two boards in one image apart.
-    """
-    canvas = image.copy() if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    palette = [
-        (0, 255, 0),
-        (0, 165, 255),
-        (255, 128, 0),
-        (255, 0, 255),
-        (0, 255, 255),
-    ]
-    for i, det in enumerate(detections):
-        c = colour if colour is not None else palette[i % len(palette)]
-        for (x, y), pid in zip(det.image_points, det.point_ids, strict=True):
-            cv2.circle(canvas, (int(round(x)), int(round(y))), radius, c, -1)
-            if not labels:
-                continue
-            cv2.putText(
-                canvas,
-                str(int(pid)),
-                (int(x) + 5, int(y) - 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
-                c,
-                1,
-                cv2.LINE_AA,
-            )
-    return canvas
+register_detector(
+    DetectorKind(
+        id="charuco",
+        label="Charuco board",
+        description=(
+            "Chessboard corners interpolated from decoded ArUco markers. The "
+            "markers give every corner an identity, so partial views and several "
+            "boards in one image both work."
+        ),
+        coded=True,
+        glyph="circle",
+        spec_cls=CharucoBoardSpec,
+        group_cls=MultiBoardDetector,
+        settings_cls=CharucoSettings,
+        catalog=CHARUCO_CATALOG,
+        summary=CHARUCO_SUMMARY,
+        board_fields=[
+            Option(
+                name="squares_x",
+                kind="int",
+                default=9,
+                minimum=2,
+                maximum=200,
+                column="count_x",
+                when="Squares across the board -- SQUARES, not interior corners. "
+                "Entering this transposed decodes every marker and interpolates "
+                "zero corners, with no error anywhere; see the warning the "
+                "detector emits when it sees that signature.",
+            ),
+            Option(
+                name="squares_y",
+                kind="int",
+                default=7,
+                minimum=2,
+                maximum=200,
+                column="count_y",
+                when="Squares down the board. If detection finds plenty of markers "
+                "but no corners at all, try swapping this with squares_x before "
+                "touching anything else.",
+            ),
+            Option(
+                name="square_length",
+                kind="float",
+                default=0.030,
+                minimum=1e-4,
+                maximum=10.0,
+                column="pitch",
+                when="Side of one square, in metres. This is the only thing that "
+                "sets the metric scale of the whole calibration: get it wrong and "
+                "every intrinsic still fits perfectly while the recovered baseline "
+                "is wrong by exactly the same factor.",
+            ),
+            Option(
+                name="marker_length",
+                kind="float",
+                default=0.022,
+                minimum=1e-4,
+                maximum=10.0,
+                when="Side of the ArUco marker printed inside a square, in metres. "
+                "Must be smaller than square_length, or the board is refused.",
+            ),
+            Option(
+                name="dictionary",
+                kind="choice",
+                default="DICT_4X4_250",
+                choices=sorted(DICTIONARIES),
+                when="Which ArUco dictionary the markers were printed from. It must "
+                "hold at least as many markers as this board uses -- half its "
+                "squares, starting at marker_id_offset.",
+            ),
+            Option(
+                name="marker_id_offset",
+                kind="int",
+                default=0,
+                minimum=0,
+                maximum=100000,
+                when="First marker id on this board. Boards sharing a dictionary "
+                "must use DISJOINT id ranges, or a marker in the overlap cannot be "
+                "attributed to a board and detection is refused outright.",
+            ),
+        ],
+    )
+)

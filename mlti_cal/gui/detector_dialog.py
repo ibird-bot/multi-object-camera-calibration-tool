@@ -51,11 +51,10 @@ class DetectorSettingsDialog(QDialog):
     def _build(self, settings: dict[str, Any]) -> None:
         root = QVBoxLayout(self)
         blurb = QLabel(
-            "Settings belong to a detector, not to a board: every Charuco board in "
-            "this session is found by the same detector with the same parameters.\n\n"
-            "Detection quality bounds everything downstream -- the solver cannot "
-            "recover accuracy the detector never found -- so changing anything here "
-            "invalidates detections already on screen."
+            "Settings belong to a detector, not a board -- every Charuco board "
+            "here uses the same parameters. The solver cannot recover accuracy "
+            "the detector never found, so changing these invalidates the "
+            "detections on screen."
         )
         blurb.setWordWrap(True)
         root.addWidget(blurb)

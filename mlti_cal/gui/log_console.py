@@ -78,10 +78,7 @@ class LogConsole(QWidget):
         self.filter_combo.addItem("everything", None)
         for source in SOURCES:
             self.filter_combo.addItem(source, source)
-        self.filter_combo.setToolTip(
-            "Narrow the log to one stage. Nothing is discarded -- the other "
-            "lines are still there when you switch back."
-        )
+        self.filter_combo.setToolTip("Narrow the log to one stage. Nothing is discarded.")
         self.filter_combo.currentIndexChanged.connect(self._rerender)
         bar.addWidget(self.filter_combo)
 
@@ -93,8 +90,8 @@ class LogConsole(QWidget):
         self.follow_check = QCheckBox("follow")
         self.follow_check.setChecked(True)
         self.follow_check.setToolTip(
-            "Scroll to the newest line. Untick to read the middle of a running "
-            "solve without being dragged to the bottom every iteration."
+            "Follow the newest line. Untick to read a running solve without "
+            "being dragged to the bottom every iteration."
         )
         bar.addWidget(self.follow_check)
 
@@ -130,11 +127,11 @@ class LogConsole(QWidget):
         if len(self.entries) > MAX_ENTRIES:
             del self.entries[: len(self.entries) - MAX_ENTRIES]
 
-    def appendPlainText(self, message: str) -> None:  # noqa: N802 (QPlainTextEdit API)
+    def appendPlainText(self, message: str) -> None:  # QPlainTextEdit API requires this name
         """Untagged write, for code that has not been given a stage."""
         self.write("app", message)
 
-    def toPlainText(self) -> str:  # noqa: N802 (QPlainTextEdit API)
+    def toPlainText(self) -> str:  # QPlainTextEdit API requires this name
         return self.text.toPlainText()
 
     # -- actions ----------------------------------------------------------
@@ -183,19 +180,19 @@ class SourceLog:
         self.console = console
         self.source = source
 
-    def appendPlainText(self, message: str) -> None:  # noqa: N802 (QPlainTextEdit API)
+    def appendPlainText(self, message: str) -> None:  # QPlainTextEdit API requires this name
         self.console.write(self.source, message)
 
     def write(self, source: str, message: str) -> None:
         self.console.write(source, message)
 
-    def toPlainText(self) -> str:  # noqa: N802 (QPlainTextEdit API)
+    def toPlainText(self) -> str:  # QPlainTextEdit API requires this name
         return self.console.toPlainText()
 
-    def setMaximumBlockCount(self, _n: int) -> None:  # noqa: N802 (QPlainTextEdit API)
+    def setMaximumBlockCount(self, _n: int) -> None:  # QPlainTextEdit API requires this name
         """Accepted and ignored: the console bounds itself."""
 
-    def setStyleSheet(self, _s: str) -> None:  # noqa: N802 (QWidget API)
+    def setStyleSheet(self, _s: str) -> None:  # QWidget API requires this name
         """Accepted and ignored: the console owns its own appearance."""
 
 

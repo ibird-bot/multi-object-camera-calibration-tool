@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal
 
-from mlti_cal.detectors.charuco import draw_detections
+from mlti_cal.detectors.base import board_colours, draw_detections
 from mlti_cal.detectors.registry import default_detector_settings
 from mlti_cal.io.config import CalibrationConfig, build_system_from_config
 from mlti_cal.problem.graph import Problem
@@ -123,18 +123,19 @@ class Session:
     def make_report(
         self,
         range_m: float = 1.5,
-        do_crossval: bool = False,
         settings: ReportSettings | None = None,
     ) -> CalibrationReport:
         if self.problem is None:
             raise RuntimeError("no problem built")
+        # Cross-validation is run from the Optimization tab, never here: the
+        # report shows the folds the user already paid for, or no folds at all.
         self.report = build_report(
             self.problem,
             self.system,
             solve_result=self.result,
             pixel_noise_std=self.pixel_noise_std,
             default_range_m=range_m,
-            do_crossval=do_crossval,
+            crossval=self.crossval,
             truth_values=self.truth_values,
             settings=settings,
         )
@@ -239,8 +240,8 @@ class DetectionWorker(QObject):
     #: Same 1/8 rule the folder-pick path decodes at, so icons do not visibly
     #: change sharpness as detection overwrites them.
     REDUCTION = 8
-    #: Corners are drawn in one fixed red here rather than the per-board
-    #: palette: on an icon the question is "did this frame work at all".
+    #: Fallback when a detection names a board the config does not (it should
+    #: not happen; a wrong-coloured dot beats an invisible one if it does).
     CORNER_BGR = (0, 0, 255)
 
     finished = Signal(object)  # (CalibrationSystem, stats)
@@ -252,6 +253,11 @@ class DetectionWorker(QObject):
     def __init__(self, config: CalibrationConfig):
         super().__init__()
         self.config = config
+        # Built once from the CONFIG, not per image from what was found in it.
+        # Deriving the colours per frame would recolour every board in any frame
+        # where one board was missed, which is precisely when the icons are
+        # being scanned for the odd one out.
+        self.colours = board_colours(b["id"] for b in config.boards)
 
     def run(self) -> None:
         try:
@@ -270,12 +276,23 @@ class DetectionWorker(QObject):
         if prog.stage == "start":
             self.image_started.emit(key)
             return
-        thumb = None if prog.image is None else self._thumbnail(prog.image, prog.detections)
+        thumb = (
+            None
+            if prog.image is None
+            else self._thumbnail(prog.image, prog.detections, self.colours)
+        )
         self.image_done.emit(key, thumb, prog.num_corners)
 
     @classmethod
-    def _thumbnail(cls, image, detections):
-        """Downscale, then draw the corners at the SCALED coordinates."""
+    def _thumbnail(cls, image, detections, colours=None):
+        """
+        Downscale, then draw the corners at the SCALED coordinates.
+
+        The icons carry the per-board palette, not one flat colour. At icon size
+        the question is no longer only "did this frame work at all" -- with three
+        objects in the rig it is "which of them did this frame get", and that is
+        answerable at 128 px from colour alone without opening the image.
+        """
         h, w = image.shape[:2]
         small = cv2.resize(
             image,
@@ -289,7 +306,13 @@ class DetectionWorker(QObject):
             replace(d, image_points=np.asarray(d.image_points, dtype=float) * scale)
             for d in detections
         ]
-        return draw_detections(small, scaled, radius=2, labels=False, colour=cls.CORNER_BGR)
+        return draw_detections(
+            small,
+            scaled,
+            radius=2,
+            labels=False,
+            colours=colours or {d.board_id: cls.CORNER_BGR for d in detections},
+        )
 
 
 class NoiseWorker(QObject):
@@ -378,7 +401,7 @@ class CrossValWorker(QObject):
 
 
 class ReportWorker(QObject):
-    """Builds the report off the GUI thread (cross-validation is slow)."""
+    """Builds the report off the GUI thread (covariance and maps are slow)."""
 
     finished = Signal(object)
     failed = Signal(str)
@@ -388,25 +411,17 @@ class ReportWorker(QObject):
         self,
         session: Session,
         range_m: float,
-        do_crossval: bool,
         settings: ReportSettings | None = None,
     ):
         super().__init__()
         self.session = session
         self.range_m = range_m
-        self.do_crossval = do_crossval
         self.settings = settings
 
     def run(self) -> None:
         try:
-            self.progress.emit(
-                "building report" + (" with cross-validation..." if self.do_crossval else "...")
-            )
-            self.finished.emit(
-                self.session.make_report(
-                    self.range_m, do_crossval=self.do_crossval, settings=self.settings
-                )
-            )
+            self.progress.emit("building report...")
+            self.finished.emit(self.session.make_report(self.range_m, settings=self.settings))
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
@@ -431,6 +446,16 @@ def run_in_thread(parent, worker: QObject, on_done, on_fail, on_progress=None):
 
     The thread and worker are stashed on `parent` because PySide6 garbage
     collects a QThread that nothing references, killing the job mid-flight.
+
+    3. That stash is a SET, not a single attribute. It used to be
+       `parent._active_thread = thread`, one slot, while `OptimizationView`
+       launches four different workers (init, solve, cross-validation, report)
+       with itself as parent -- and each handler disables only its OWN button,
+       so nothing stopped a user from pressing "Estimate starting point" during
+       a solve. That second call rebound the slot, dropped the last reference to
+       the running solve's QThread, and Qt collected a thread that was still
+       executing. Holding every live job and releasing each one when it finishes
+       is what makes the lifetime correct rather than merely usually correct.
     """
     thread = QThread(parent)
     worker.moveToThread(thread)
@@ -444,7 +469,54 @@ def run_in_thread(parent, worker: QObject, on_done, on_fail, on_progress=None):
     if on_progress is not None:
         worker.progress.connect(on_progress)
 
+    live = getattr(parent, "_live_jobs", None)
+    if live is None:
+        live = set()
+        parent._live_jobs = live
+    live.add((thread, worker))
+    # Released only once the thread's event loop has actually stopped, not when
+    # the worker signals -- between those two moments the QThread is still
+    # running and still needs a reference. A lambda is fine HERE, unlike in the
+    # completion signals above: it touches no widgets, so running it on the
+    # worker thread is harmless. The QThread is NOT deleteLater'd -- it is
+    # parented to `parent`, so Qt already owns it, and destroying it here would
+    # invalidate any caller still holding `_active_thread` to wait on.
+    thread.finished.connect(lambda: live.discard((thread, worker)))
+
+    #: The most recently started job, for callers that want to wait on it (the
+    #: GUI tests do). Lifetime is owned by `_live_jobs` above, not by this.
     parent._active_thread = thread
     parent._active_worker = worker
     thread.start()
     return thread
+
+
+def busy(parent) -> bool:
+    """True while any job started by `run_in_thread(parent, ...)` is running."""
+    return bool(getattr(parent, "_live_jobs", None))
+
+
+def refuse_if_busy(parent, action: str) -> bool:
+    """
+    True (and says so) when `parent` already has a job running.
+
+    Each button disables ITSELF while its own job runs, which stops a double
+    click but not a different button on the same tab. Two solves at once are not
+    merely slow: both workers mutate the same `Problem` object, so the second
+    one's residuals are evaluated against parameters the first is midway through
+    retracting, and the result is a converged-looking calibration fitted to
+    nothing. Refusing here is the guard that covers every pair.
+
+    `QMessageBox` is imported inside the function so that importing this module
+    stays as cheap as it was -- it is imported by the views at startup.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    if not busy(parent):
+        return False
+    QMessageBox.information(
+        parent,
+        "Already running",
+        f"A job is still running on this tab. Wait for it to finish before starting {action}.",
+    )
+    return True

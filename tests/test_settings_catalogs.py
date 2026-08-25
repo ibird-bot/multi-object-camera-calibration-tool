@@ -20,7 +20,14 @@ from mlti_cal.detectors.registry import (
     detector_settings_from_dict,
     implemented_kinds,
 )
-from mlti_cal.detectors.settings import CHARUCO_CATALOG, CharucoSettings
+from mlti_cal.detectors.settings import (
+    CHARUCO_CATALOG,
+    CHECKERBOARD_CATALOG,
+    CIRCLE_GRID_CATALOG,
+    CharucoSettings,
+    CheckerboardSettings,
+    CircleGridSettings,
+)
 from mlti_cal.io.config import CalibrationConfig
 from mlti_cal.problem.settings import INIT_CATALOG, InitSettings
 from mlti_cal.report.settings import REPORT_CATALOG, ReportSettings
@@ -29,6 +36,8 @@ from mlti_cal.solvers.catalog import CATALOG, COMMON_OPTIONS, describe
 
 CASES = [
     ("charuco", CHARUCO_CATALOG, CharucoSettings),
+    ("checkerboard", CHECKERBOARD_CATALOG, CheckerboardSettings),
+    ("circle_grid", CIRCLE_GRID_CATALOG, CircleGridSettings),
     ("initialization", INIT_CATALOG, InitSettings),
     ("report", REPORT_CATALOG, ReportSettings),
 ]
@@ -84,10 +93,38 @@ def test_choice_options_accept_every_value_they_offer():
         if opt.kind == "choice":
             for choice in opt.choices:
                 CharucoSettings(**{opt.name: choice})
+    for opt in CHECKERBOARD_CATALOG:
+        if opt.kind == "choice":
+            for choice in opt.choices:
+                CheckerboardSettings(**{opt.name: choice})
+    for opt in CIRCLE_GRID_CATALOG:
+        if opt.kind == "choice":
+            for choice in opt.choices:
+                CircleGridSettings(**{opt.name: choice})
     for opt in INIT_CATALOG:
         if opt.kind == "choice":
             for choice in opt.choices:
                 InitSettings(**{opt.name: choice})
+
+
+def test_blob_defaults_match_opencv_defaults():
+    """
+    Our written-out blob defaults still equal the installed OpenCV's.
+
+    Same contract as the Charuco marker defaults below: if OpenCV changes one,
+    this fails rather than the project documenting a default it no longer uses.
+    """
+    p = cv2.SimpleBlobDetector_Params()
+    s = CircleGridSettings()
+    assert s.min_area == pytest.approx(p.minArea)
+    assert s.max_area == pytest.approx(p.maxArea)
+    assert s.min_circularity == pytest.approx(p.minCircularity)
+    assert s.min_convexity == pytest.approx(p.minConvexity)
+    assert s.min_inertia_ratio == pytest.approx(p.minInertiaRatio)
+    assert s.min_dist_between_blobs == pytest.approx(p.minDistBetweenBlobs)
+    assert s.min_threshold == pytest.approx(p.minThreshold)
+    assert s.max_threshold == pytest.approx(p.maxThreshold)
+    assert s.threshold_step == pytest.approx(p.thresholdStep)
 
 
 def test_detection_settings_match_opencv_defaults():
@@ -187,6 +224,16 @@ def test_floors_are_enforced_not_merely_documented():
         ReportSettings(crossval_folds=1)
     with pytest.raises(ValueError, match="no window size"):
         CharucoSettings(adaptive_thresh_win_size_min=30, adaptive_thresh_win_size_max=10)
+    with pytest.raises(ValueError, match="unknown algorithm"):
+        CheckerboardSettings(algorithm="SB2")
+    with pytest.raises(ValueError, match="origin marker"):
+        CheckerboardSettings(algorithm="LEGACY", marker=True)
+    with pytest.raises(ValueError, match="unknown blob_color"):
+        CircleGridSettings(blob_color="black")
+    with pytest.raises(ValueError, match="no blob could match"):
+        CircleGridSettings(min_area=500.0, max_area=100.0)
+    with pytest.raises(ValueError, match="no threshold level"):
+        CircleGridSettings(min_threshold=200.0, max_threshold=50.0)
 
 
 def test_common_solver_options_exist_on_solve_options():
@@ -201,11 +248,11 @@ def test_describe_lists_only_the_options_a_backend_reads():
     `--describe` and the GUI panel come from the same `options_for`.
 
     A backend must not advertise a knob it ignores: scipy has no thread count,
-    and the GTSAM adapter sets only a relative error tolerance.
+    so rendering one beside it would be a control that does nothing.
     """
     from mlti_cal.solvers.catalog import HONOURED_COMMON, options_for
 
-    assert set(CATALOG) == {"scipy", "ceres", "gtsam"}
+    assert set(CATALOG) == {"scipy", "ceres"}
     assert "dense_column_limit" in describe("scipy")
 
     for backend in CATALOG:
@@ -230,13 +277,12 @@ def test_honoured_common_options_match_what_the_adapters_read():
     """
     import inspect
 
-    from mlti_cal.solvers import ceres_backend, gtsam_backend, scipy_backend
+    from mlti_cal.solvers import ceres_backend, scipy_backend
     from mlti_cal.solvers.catalog import HONOURED_COMMON
 
     sources = {
         "scipy": inspect.getsource(scipy_backend),
         "ceres": inspect.getsource(ceres_backend),
-        "gtsam": inspect.getsource(gtsam_backend),
     }
     for backend, source in sources.items():
         for opt in COMMON_OPTIONS:
@@ -263,10 +309,18 @@ def test_every_implemented_kind_has_settings_and_a_catalog():
 
 def test_unimplemented_kinds_say_why_rather_than_vanishing():
     """
-    Listing them is the point: absence would read as "not supported, ever".
+    A listed-but-unwritten kind must explain itself: a greyed row with no reason
+    reads as "broken", and no row at all reads as "not supported, ever".
+
+    This no longer demands that such a kind EXISTS. It used to, which made it a
+    test of the registry's contents rather than of the contract -- and it failed
+    the moment the last unimplemented kind was either built or, as with plain
+    Aruco, deliberately dropped. The contract is what matters; it arms itself
+    again as soon as a planned kind is added.
     """
     pending = [k for k in DETECTOR_KINDS.values() if not k.implemented]
-    assert pending, "the registry should still name the kinds that are planned"
+    if not pending:
+        pytest.skip("every listed detector kind is implemented")
     for kind in pending:
         assert kind.unavailable_reason, f"{kind.id} is disabled with no reason given"
         assert kind.description, f"{kind.id} does not say what it is"
@@ -280,12 +334,36 @@ def test_default_settings_cover_exactly_the_implemented_kinds():
 
 
 def test_settings_from_a_newer_config_do_not_break_this_build():
-    """A config naming a detector this build lacks must still load."""
+    """
+    A config naming a detector this build lacks must still load.
+
+    The example is a made-up name rather than a real-but-unimplemented kind.
+    This test used to name `checkerboard`, then Aruco, and each time that kind
+    landed or was removed the test quietly stopped testing anything -- once
+    silently, once as a StopIteration. A name no build will ever have cannot
+    decay that way.
+    """
     loaded = detector_settings_from_dict(
-        {"charuco": {"corner_refinement": "CONTOUR"}, "checkerboard": {"flags": 7}}
+        {"charuco": {"corner_refinement": "CONTOUR"}, "hypercube_target": {"flags": 7}}
     )
     assert loaded["charuco"].corner_refinement == "CONTOUR"
-    assert "checkerboard" not in loaded
+    assert "hypercube_target" not in loaded
+    # ...and the kinds this build DOES have still come back at their defaults.
+    assert set(loaded) == {k.id for k in implemented_kinds()}
+
+
+def test_a_known_but_unimplemented_kind_is_dropped_too():
+    """
+    The other half of the same guard: a kind this build KNOWS about but has not
+    written yet must be dropped rather than constructed, because it has no
+    settings class to construct. Skipped while every listed kind is implemented,
+    which is the case today -- it arms itself the moment one is not.
+    """
+    pending = [k.id for k in DETECTOR_KINDS.values() if not k.implemented]
+    if not pending:
+        pytest.skip("every listed detector kind is implemented")
+    loaded = detector_settings_from_dict({pending[0]: {"flags": 7}})
+    assert pending[0] not in loaded
 
 
 def test_legacy_flat_detection_block_still_loads(tmp_path):
@@ -307,3 +385,24 @@ def test_cli_topics_are_named_after_detectors():
         "a topic called 'detection' claims to speak for every detector while "
         "listing only ArUco parameters"
     )
+
+
+def test_the_shared_mask_options_do_not_drift_apart():
+    """
+    Both uncoded detectors carry their own copy of the mask knobs.
+
+    That is deliberate -- how much clutter must be gone before a search is
+    trustworthy is a property of the search, so each detector owns its own. But
+    two copies with the same names can drift, and every other test here checks a
+    catalog against its OWN dataclass, so a divergence would go unnoticed with
+    the suite green. The knobs must mean the same thing wherever they appear.
+    """
+    shared = {"mask_other_boards", "mask_padding_squares", "mask_fill_value", "mask_min_coverage"}
+    checker = CheckerboardSettings().to_dict()
+    grid = CircleGridSettings().to_dict()
+    assert shared <= set(checker) and shared <= set(grid), "a mask knob went missing"
+    for name in sorted(shared):
+        assert checker[name] == grid[name], (
+            f"{name} defaults to {checker[name]!r} for a checkerboard but "
+            f"{grid[name]!r} for a dot grid"
+        )

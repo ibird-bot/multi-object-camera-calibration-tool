@@ -92,13 +92,27 @@ def test_every_catalog_option_round_trips_through_its_widget(qapp):
     than machine epsilon". A knob that is displayed and then silently discarded
     is worse than one that was never exposed.
     """
-    from mlti_cal.detectors.settings import CHARUCO_CATALOG
+    from mlti_cal.detectors.settings import (
+        CHARUCO_CATALOG,
+        CHECKERBOARD_CATALOG,
+        CIRCLE_GRID_CATALOG,
+    )
     from mlti_cal.gui.settings_panel import make_option_widget, widget_value
     from mlti_cal.problem.settings import INIT_CATALOG
     from mlti_cal.report.settings import REPORT_CATALOG
     from mlti_cal.solvers.catalog import CATALOG, COMMON_OPTIONS
 
-    catalogs = [CHARUCO_CATALOG, INIT_CATALOG, REPORT_CATALOG, COMMON_OPTIONS]
+    # Every detector catalog, not just the first one written: a list that names
+    # one detector stops covering the others the moment they exist, which is the
+    # same quiet decay this test was added to catch in the first place.
+    catalogs = [
+        CHARUCO_CATALOG,
+        CHECKERBOARD_CATALOG,
+        CIRCLE_GRID_CATALOG,
+        INIT_CATALOG,
+        REPORT_CATALOG,
+        COMMON_OPTIONS,
+    ]
     catalogs += [entry["options"] for entry in CATALOG.values()]
     for catalog in catalogs:
         for opt in catalog:
@@ -543,9 +557,9 @@ def test_solver_options_follow_the_selected_backend(qapp):
     """
     Each backend shows its own options and only the common ones it READS.
 
-    scipy has no thread count and the GTSAM adapter sets only a relative error
-    tolerance -- rendering the rest beside them would be controls that silently
-    do nothing, which is the failure mode this whole panel exists to remove.
+    scipy has no thread count -- rendering one beside it would be a control that
+    silently does nothing, which is the failure mode this whole panel exists to
+    remove.
     """
     from mlti_cal.gui.app import MainWindow
     from mlti_cal.solvers.catalog import options_for
@@ -563,7 +577,6 @@ def test_solver_options_follow_the_selected_backend(qapp):
 
     assert "num_threads" in seen["ceres"]
     assert "num_threads" not in seen["scipy"], "scipy ignores it"
-    assert "gradient_tolerance" not in seen["gtsam"], "the GTSAM adapter ignores it"
     assert seen["scipy"] != seen["ceres"], "the panel must actually change"
 
 
@@ -842,10 +855,13 @@ def _describe_board(view):
     from test_config_pipeline import BOARD
 
     t = view.board_table
-    for col, key in enumerate(("id", "squares_x", "squares_y", "square_length", "marker_length")):
-        t.item(0, col).setText(str(BOARD[key]))
-    t.cellWidget(0, 5).setCurrentText(BOARD["dictionary"])
-    t.cellWidget(0, 6).setValue(BOARD["marker_id_offset"])
+    # Column 1 is the detector-kind combo and carries no text item, so the text
+    # columns are addressed by name rather than by counting from zero.
+    assert t.cellWidget(0, 1).currentData() == "charuco"
+    t.item(0, 0).setText(str(BOARD["id"]))
+    for key in ("squares_x", "squares_y", "square_length", "marker_length", "marker_id_offset"):
+        t.item(0, board_col(view, "charuco", key)).setText(str(BOARD[key]))
+    t.cellWidget(0, board_col(view, "charuco", "dictionary")).setCurrentText(BOARD["dictionary"])
 
 
 def test_detection_runs_off_the_gui_thread_and_draws_on_the_thumbnails(qapp, tmp_path, monkeypatch):
@@ -1283,3 +1299,277 @@ def test_unavailable_backend_is_disabled_in_the_picker(qapp):
         enabled = combo.model().item(i).isEnabled()
         assert enabled == ok, f"{name}: enabled={enabled} but usable={ok}"
     w.close()
+
+
+# ---------------------------------------------------------------------------
+# Mixed calibration objects: charuco and plain checkerboard in one rig
+# ---------------------------------------------------------------------------
+
+
+#: Windows are kept alive here on purpose. `MainWindow().detection` alone drops
+#: the only Python reference to the window, Qt deletes the C++ side, and every
+#: widget reached through it raises "Internal C++ object already deleted".
+_OPEN_WINDOWS = []
+
+
+def board_col(view, kind_id: str, field_name: str) -> int:
+    """
+    The table column holding one field of one kind.
+
+    Tests address cells by name because the columns are DERIVED from the
+    registry: a hardcoded index is correct only until someone installs a plugin
+    that declares a field, which is exactly the coupling this refactor removed.
+    """
+    from mlti_cal.detectors.registry import get_kind
+
+    opt = next(o for o in get_kind(kind_id).board_fields if o.name == field_name)
+    return view._column_index(opt.column or opt.name)
+
+
+def _fresh_detection_view():
+    from mlti_cal.gui.app import MainWindow
+
+    window = MainWindow()
+    _OPEN_WINDOWS.append(window)
+    window.detection.board_table.setRowCount(0)
+    return window.detection
+
+
+def test_a_checkerboard_row_writes_a_checkerboard_board(qapp):
+    """
+    The marker columns must not reach the config for a board with no markers.
+
+    A checkerboard entry carrying a dictionary would read as a coded board to
+    anyone opening the JSON later, and `_checkerboard_spec` would have to guess
+    which of the two the user meant.
+    """
+    view = _fresh_detection_view()
+    view._add_board("checkerboard")
+    assert view._board_kind(0) == "checkerboard"
+
+    config = view._collect_config()
+    assert len(config.boards) == 1
+    board = config.boards[0]
+    assert board["kind"] == "checkerboard"
+    assert "dictionary" not in board
+    assert "marker_length" not in board
+    assert "marker_id_offset" not in board
+    grouped = config.specs_by_kind()
+    assert [s.id for s in grouped["checkerboard"]] == [board["id"]]
+    assert "charuco" not in grouped
+
+
+def test_marker_columns_grey_out_for_a_checkerboard_and_come_back(qapp):
+    """Greyed, not cleared -- switching the kind back must not lose the values."""
+    from PySide6.QtCore import Qt
+
+    view = _fresh_detection_view()
+    view._add_board("charuco")
+    marker_col = board_col(view, "charuco", "marker_length")
+    dict_col = board_col(view, "charuco", "dictionary")
+    offset_col = board_col(view, "charuco", "marker_id_offset")
+    view.board_table.item(0, marker_col).setText("0.0195")
+
+    combo = view.board_table.cellWidget(0, 1)
+    combo.setCurrentIndex(combo.findData("checkerboard"))
+    assert not view.board_table.cellWidget(0, dict_col).isEnabled()
+    assert not (view.board_table.item(0, offset_col).flags() & Qt.ItemIsEditable)
+    assert not (view.board_table.item(0, marker_col).flags() & Qt.ItemIsEditable)
+
+    combo.setCurrentIndex(combo.findData("charuco"))
+    assert view.board_table.cellWidget(0, dict_col).isEnabled()
+    assert view.board_table.item(0, marker_col).flags() & Qt.ItemIsEditable
+    assert view.board_table.item(0, marker_col).text() == "0.0195", "the typed value was lost"
+
+
+def test_a_mixed_rig_round_trips_through_save_and_load(qapp, tmp_path):
+    view = _fresh_detection_view()
+    view._add_board("charuco")
+    view._add_board("checkerboard")
+    before = view._collect_config()
+    assert [b["kind"] for b in before.boards] == ["charuco", "checkerboard"]
+
+    from mlti_cal.io.config import CalibrationConfig
+
+    path = before.save(tmp_path / "mixed.json")
+    view._apply_config(CalibrationConfig.load(path))
+    after = view._collect_config()
+    assert [b["kind"] for b in after.boards] == ["charuco", "checkerboard"]
+    assert after.boards == before.boards
+
+
+def test_kinds_in_use_reports_both_detectors(qapp):
+    """The settings dialog highlights the detectors a rig actually needs."""
+    view = _fresh_detection_view()
+    assert view._kinds_in_use() == set()
+    view._add_board("charuco")
+    assert view._kinds_in_use() == {"charuco"}
+    view._add_board("checkerboard")
+    assert view._kinds_in_use() == {"charuco", "checkerboard"}
+
+
+def test_switching_a_kind_after_removing_a_row_greys_the_right_board(qapp):
+    """
+    Regression: the combo used to capture its row index when the row was built.
+
+    Removing an earlier row shifts everything below it, so the captured index
+    then pointed at the wrong board -- switching row 0 to a checkerboard greyed
+    row 1's marker columns instead, or silently did nothing.
+    """
+    from PySide6.QtCore import Qt
+
+    view = _fresh_detection_view()
+    for _ in range(3):
+        view._add_board("charuco")
+    view.board_table.removeRow(0)
+    assert view.board_table.rowCount() == 2
+
+    combo = view.board_table.cellWidget(0, 1)
+    combo.setCurrentIndex(combo.findData("checkerboard"))
+
+    assert not view.board_table.cellWidget(0, 6).isEnabled(), "row 0 was not greyed"
+    assert not (view.board_table.item(0, 5).flags() & Qt.ItemIsEditable)
+    assert view.board_table.cellWidget(1, 6).isEnabled(), "row 1 was greyed by mistake"
+
+
+def test_detection_thumbnails_use_the_per_board_palette(qapp, tmp_path):
+    """
+    The icons are what you look at when detection finishes, so 'three boards,
+    three colours' has to hold there and not only in the full-size preview.
+    """
+    import numpy as np
+
+    from mlti_cal.detectors.base import Detection, board_colours
+    from mlti_cal.gui.session import DetectionWorker
+    from mlti_cal.io.config import CalibrationConfig
+
+    config = CalibrationConfig(
+        boards=[
+            {
+                "id": "board_A",
+                "squares_x": 8,
+                "squares_y": 6,
+                "square_length": 0.03,
+                "marker_length": 0.022,
+                "dictionary": "DICT_4X4_250",
+                "marker_id_offset": 0,
+            },
+            {
+                "id": "board_B",
+                "squares_x": 8,
+                "squares_y": 6,
+                "square_length": 0.03,
+                "marker_length": 0.022,
+                "dictionary": "DICT_4X4_250",
+                "marker_id_offset": 40,
+            },
+            {
+                "id": "board_C",
+                "kind": "checkerboard",
+                "squares_x": 9,
+                "squares_y": 7,
+                "square_length": 0.03,
+            },
+        ]
+    )
+    worker = DetectionWorker(config)
+    assert len(set(worker.colours.values())) == 3, "three boards must get three colours"
+    assert worker.colours == board_colours(["board_A", "board_B", "board_C"])
+
+    image = np.zeros((160, 160), np.uint8)
+    dets = [
+        Detection("board_A", np.array([0]), np.array([[40.0, 40.0]])),
+        Detection("board_C", np.array([0]), np.array([[120.0, 120.0]]), kind="checkerboard"),
+    ]
+    thumb = DetectionWorker._thumbnail(image, dets, worker.colours)
+    painted = {tuple(int(v) for v in px) for px in thumb.reshape(-1, 3) if px.any()}
+    assert worker.colours["board_A"] in painted
+    assert worker.colours["board_C"] in painted
+
+
+def test_a_circle_grid_row_writes_dot_vocabulary(qapp):
+    """
+    A dot grid counts DOTS and measures a PITCH.
+
+    Writing it out as "squares" would misdescribe the rig in the one file
+    someone opens to find out what was calibrated against, and `_circle_grid_spec`
+    rejects the square-based names outright.
+    """
+    view = _fresh_detection_view()
+    view._add_board("circle_grid")
+    assert view._board_kind(0) == "circle_grid"
+
+    board = view._collect_config().boards[0]
+    assert board["kind"] == "circle_grid"
+    assert {"circles_x", "circles_y", "spacing", "grid_type"} <= set(board)
+    assert not {"squares_x", "squares_y", "square_length", "dictionary"} & set(board)
+    assert board["grid_type"] == "asymmetric", "the orientation-resolving default"
+
+
+def test_each_kind_enables_only_the_columns_it_declares(qapp):
+    """
+    A column belongs to whichever kinds declare a field for it, and is greyed
+    for the rest.
+
+    `dictionary` and `grid_type` used to SHARE one column whose contents were
+    swapped per kind -- a hack that existed only because the table was a fixed
+    eight columns wide. Columns are derived from the registry now, so each field
+    gets its own and nothing has to be swapped underneath the user.
+    """
+    from PySide6.QtCore import Qt
+
+    view = _fresh_detection_view()
+    view._add_board("charuco")
+    dict_col = board_col(view, "charuco", "dictionary")
+    grid_col = board_col(view, "circle_grid", "grid_type")
+    assert dict_col != grid_col, "two different fields must not share a column"
+
+    def enabled(col):
+        widget = view.board_table.cellWidget(0, col)
+        if widget is not None:
+            return widget.isEnabled()
+        return bool(view.board_table.item(0, col).flags() & Qt.ItemIsEditable)
+
+    assert enabled(dict_col) and not enabled(grid_col)
+    assert view.board_table.cellWidget(0, dict_col).currentText() == "DICT_4X4_250"
+
+    kind = view.board_table.cellWidget(0, 1)
+    kind.setCurrentIndex(kind.findData("circle_grid"))
+    assert enabled(grid_col) and not enabled(dict_col)
+    assert view.board_table.cellWidget(0, grid_col).currentText() == "asymmetric"
+
+    kind.setCurrentIndex(kind.findData("checkerboard"))
+    assert not enabled(dict_col) and not enabled(grid_col), "a checkerboard reads neither"
+
+    kind.setCurrentIndex(kind.findData("charuco"))
+    assert enabled(dict_col), "the dictionary column came back"
+    # SELECTED, not merely enabled: the value must survive the round trip rather
+    # than falling to index 0, which for the dictionary list is DICT_4X4_100.
+    assert view.board_table.cellWidget(0, dict_col).currentText() == "DICT_4X4_250"
+
+
+def test_all_three_kinds_round_trip_through_save_and_load(qapp, tmp_path):
+    from mlti_cal.io.config import CalibrationConfig
+
+    view = _fresh_detection_view()
+    for kind in ("charuco", "checkerboard", "circle_grid"):
+        view._add_board(kind)
+    before = view._collect_config()
+    assert [b["kind"] for b in before.boards] == ["charuco", "checkerboard", "circle_grid"]
+    assert view._kinds_in_use() == {"charuco", "checkerboard", "circle_grid"}
+
+    path = before.save(tmp_path / "three.json")
+    view._apply_config(CalibrationConfig.load(path))
+    assert view._collect_config().boards == before.boards
+
+
+def test_the_object_menu_offers_every_implemented_kind(qapp):
+    """Registry-driven, so a written detector cannot stay greyed out in the menu."""
+    from mlti_cal.detectors.registry import DETECTOR_KINDS
+
+    view = _fresh_detection_view()
+    button = view._build_add_object_button()
+    _OPEN_WINDOWS.append(button)
+    actions = {a.text(): a for a in button.menu().actions()}
+    for kind in DETECTOR_KINDS.values():
+        assert actions[kind.label].isEnabled() is kind.implemented, kind.label

@@ -44,6 +44,7 @@ from mlti_cal.gui.session import (
     InitWorker,
     Session,
     SolveWorker,
+    refuse_if_busy,
     run_in_thread,
 )
 from mlti_cal.gui.settings_panel import (
@@ -126,9 +127,7 @@ class OptimizationView(QWidget):
         head.addStretch()
         self.clear_btn = QPushButton("Clear")
         self.clear_btn.setToolTip(
-            "Undo your input on this panel: forget every value you typed and "
-            "switch every parameter back on.\n"
-            "The estimated values stay; only what you asked for is dropped."
+            "Drop every value you typed and switch every parameter back on.\nEstimated values stay."
         )
         self.clear_btn.clicked.connect(self._clear_values)
         head.addWidget(self.clear_btn)
@@ -139,13 +138,10 @@ class OptimizationView(QWidget):
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         lv.addWidget(self.tree)
         note = QLabel(
-            "Leave a value box empty and the parameter is estimated. Type a "
-            "number and it is held there -- in the starting estimate and in the "
-            "solve, which never moves it. Unticking forces the parameter to zero "
-            "instead; fx, fy, cx and cy cannot be switched off, since a camera "
-            "without them does not project. The reference camera's extrinsic is "
-            "always fixed: it is the gauge, and freeing it makes the covariance "
-            "rank deficient by 6."
+            "Empty: estimated. Number: held fixed, in the estimate and the solve. "
+            "Untick: forced to zero -- not available for fx, fy, cx, cy, without "
+            "which a camera cannot project. The reference extrinsic is always "
+            "fixed; it is the gauge."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: gray; font-size: 11px;")
@@ -185,13 +181,12 @@ class OptimizationView(QWidget):
         # a solve that looks converged and is wrong. Robustness is opt-in.
         self.loss_combo.setCurrentText("trivial")
         self.loss_combo.setToolTip(
-            "Robust loss, applied per corner inside the core as IRLS weights so "
-            "every backend optimises the identical objective. Note this is not "
-            "identical to Ceres' Triggs-corrected loss.\n\n"
-            "trivial: plain least squares -- start here.\n"
-            "huber: outliers cost less, but never nothing.\n"
-            "cauchy/soft_l1: outliers are nearly ignored. Powerful, and the "
-            "reported cost is then no longer a measure of fit quality."
+            "Per-corner IRLS weights, applied in the core so every backend "
+            "optimises the same objective. Not Ceres' Triggs correction.\n\n"
+            "trivial -- least squares. Start here.\n"
+            "huber -- outliers cost less, never nothing.\n"
+            "cauchy/soft_l1 -- outliers nearly ignored; the cost then stops "
+            "measuring fit quality."
         )
         sf.addRow("robust loss", self.loss_combo)
         self.loss_scale = QDoubleSpinBox()
@@ -211,8 +206,8 @@ class OptimizationView(QWidget):
         ib = QHBoxLayout()
         self.init_btn = QPushButton("Estimate starting point")
         self.init_btn.setToolTip(
-            "Bootstrap intrinsics with cv2.calibrateCamera, poses with cv2.solvePnP, "
-            "and camera extrinsics from boards seen by two cameras at once.\n"
+            "Intrinsics via cv2.calibrateCamera, poses via cv2.solvePnP, "
+            "extrinsics from boards seen by two cameras at once.\n"
             "Nothing is estimated until you click this."
         )
         self.init_btn.clicked.connect(self._estimate)
@@ -223,9 +218,8 @@ class OptimizationView(QWidget):
         self.restore_btn.clicked.connect(self._restore_initial)
         self.init_settings_btn = QPushButton("Settings...")
         self.init_settings_btn.setToolTip(
-            "PnP method, RANSAC, the point and view floors, and how repeated "
-            "estimates are averaged. Opens in its own window; nothing changes "
-            "until you apply."
+            "PnP method, RANSAC, point and view floors, averaging of repeated "
+            "estimates. Nothing changes until you apply."
         )
         self.init_settings_btn.clicked.connect(self.open_init_settings)
         ib.addWidget(self.init_btn)
@@ -244,20 +238,20 @@ class OptimizationView(QWidget):
         self.solve_btn.clicked.connect(self._solve)
         self.build_btn = QPushButton("Build problem")
         self.build_btn.setToolTip(
-            "Assemble the problem from the current tree and loss, without solving, "
-            "and print what it contains in the log.\n"
-            "Solve does this for you -- this button is for looking first."
+            "Assemble the problem from the current tree and loss without solving, "
+            "and print it to the log. Solve does this for you; this is for "
+            "looking first."
         )
         self.build_btn.clicked.connect(self._build_problem)
         self.crossval_btn = QPushButton("Cross-validate")
         self.crossval_btn.setToolTip(
-            "Hold out whole frames, re-solve on the rest, and measure reprojection "
+            "Hold out whole frames, re-solve on the rest, measure reprojection "
             "on the frames the fit never saw.\n\n"
-            "This is the only error number here that is not measured on the data it "
-            "was fitted to. Training RMS can always be lowered by adding parameters; "
-            "held-out RMS cannot.\n\n"
-            "Costs one full solve per fold, and does not touch your current "
-            "parameters -- the result is printed in the log below."
+            "The only error here not measured on its own training data. "
+            "Training RMS always drops when you add parameters; this does "
+            "not.\n\n"
+            "One full solve per fold. Result goes to the log; your parameters "
+            "are untouched."
         )
         self.crossval_btn.clicked.connect(self._cross_validate)
         self.folds_spin = make_option_widget(CROSSVAL_FOLDS_OPTION)
@@ -291,9 +285,9 @@ class OptimizationView(QWidget):
         if backend not in CATALOG:
             return
         # `options_for` returns the backend's own options plus only those COMMON
-        # options this backend actually reads -- scipy has no thread count and
-        # the GTSAM adapter sets only a relative error tolerance, so rendering
-        # the rest beside them would show controls that silently do nothing.
+        # options this backend actually reads -- scipy has no thread count, for
+        # instance, so rendering one beside it would show a control that
+        # silently does nothing.
         #
         # One shared builder, so bounds and decimal places come from the catalog
         # rather than being retyped here. The old inline version fixed every
@@ -346,6 +340,8 @@ class OptimizationView(QWidget):
         default parameters would measure how badly an unfitted model
         generalises, which is a number about nothing.
         """
+        if refuse_if_busy(self, "cross-validation"):
+            return
         if not self.session.is_ready_to_solve:
             QMessageBox.information(self, "No data", "Run detection first.")
             return
@@ -529,6 +525,8 @@ class OptimizationView(QWidget):
 
     def _estimate(self):
         """Run the bootstrap, on demand, in a worker thread."""
+        if refuse_if_busy(self, "the starting estimate"):
+            return
         if not self.session.is_ready_to_solve:
             QMessageBox.information(self, "No data", "Run detection first.")
             return
@@ -586,8 +584,8 @@ class OptimizationView(QWidget):
         self.restore_btn.setEnabled(s.is_initialized)
         if not s.is_initialized:
             self.init_summary.setText(
-                "<span style='color:#b36b00;'><b>No starting point yet.</b> "
-                "Click <i>Estimate starting point</i> -- Solve needs one.</span>"
+                "<span style='color:#b36b00;'><b>No starting point.</b> "
+                "Click <i>Estimate starting point</i>.</span>"
             )
             return
         rep = s.initial_report or {}
@@ -829,9 +827,9 @@ class OptimizationView(QWidget):
         edit = QLineEdit()
         edit.setPlaceholderText("estimated")
         edit.setToolTip(
-            "Empty: estimated from the data.\n"
-            "A number: held at exactly that value, in the starting estimate and "
-            "in the solve.\nClear the box to let it be estimated again."
+            "Empty: estimated.\n"
+            "A number: held at exactly that, in the estimate and the solve.\n"
+            "Clear the box to estimate it again."
         )
         edit.editingFinished.connect(lambda k=key: self._value_edited(k))
         self._value_edits[key] = edit
@@ -968,6 +966,8 @@ class OptimizationView(QWidget):
 
     # ------------------------------------------------------------------
     def _solve(self):
+        if refuse_if_busy(self, "a solve"):
+            return
         if not self.session.is_ready_to_solve:
             QMessageBox.information(self, "No data", "Run detection first.")
             return
@@ -979,9 +979,8 @@ class OptimizationView(QWidget):
                 self,
                 "No starting point",
                 "Click 'Estimate starting point' first.\n\n"
-                "Solving from the default parameters would start from focal = "
-                "image width and identity extrinsics, which does not converge to "
-                "anything trustworthy.",
+                "The defaults (focal = image width, identity extrinsics) do not "
+                "converge to anything trustworthy.",
             )
             return
         if not self._warn_if_detections_are_stale("this solve"):

@@ -66,13 +66,12 @@ class NoiseDialog(QDialog):
         root = QVBoxLayout(self)
 
         blurb = QLabel(
-            "Point a fixed camera at a fixed board and take several pictures "
-            "<b>without touching anything</b>. Every difference between one frame's "
-            "corner and the next frame's same corner is detection noise.\n\n"
-            "This measures repeatability, not accuracy: a refinement biased by half "
-            "a pixel in a consistent direction is perfectly repeatable and will look "
-            "excellent here. If the rig moves during the sequence, that motion is "
-            "detected and reported separately rather than counted as noise."
+            "Fixed camera, fixed board, several shots <b>without touching "
+            "anything</b>. Each corner's frame-to-frame difference is detection "
+            "noise.\n\n"
+            "Repeatability, not accuracy: a consistent half-pixel bias looks "
+            "excellent here. Rig motion is reported separately, not counted as "
+            "noise."
         )
         blurb.setWordWrap(True)
         blurb.setTextFormat(Qt.RichText)
@@ -92,9 +91,9 @@ class NoiseDialog(QDialog):
         for spec in self._specs:
             self.board_combo.addItem(f"{spec.id}  ({spec.squares_x}x{spec.squares_y})", spec)
         self.board_combo.setToolTip(
-            "Which board is in the static pictures. Only this board is given to "
-            "the detector, so a marker-ID collision between other configured "
-            "boards cannot block a measurement that never touches them."
+            "Which board is in the static pictures. Only this one is given to "
+            "the detector, so ID collisions between other boards cannot block "
+            "the measurement."
         )
         form.addRow("board", self.board_combo)
         root.addLayout(form)

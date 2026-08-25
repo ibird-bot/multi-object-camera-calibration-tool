@@ -23,7 +23,11 @@ from mlti_cal.problem.types import CalibrationSystem
 from mlti_cal.report import coverage as coverage_mod
 from mlti_cal.report import residuals as residual_mod
 from mlti_cal.report import warnings as warn_mod
-from mlti_cal.report.covariance import CovarianceResult, compute_covariance
+from mlti_cal.report.covariance import (
+    CovarianceResult,
+    compute_covariance,
+    correlation_blocks,
+)
 from mlti_cal.report.settings import ReportSettings
 from mlti_cal.report.uncertainty import (
     UncertaintyMap,
@@ -61,6 +65,8 @@ class CalibrationReport:
     gt_check: dict | None = None
     warnings: list = field(default_factory=list)
     camera_estimates: dict = field(default_factory=dict)
+    residual_grids: dict[str, dict] = field(default_factory=dict)
+    correlations: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -73,6 +79,8 @@ class CalibrationReport:
             "outliers": self.outliers,
             "error_vs_radius": self.error_vs_radius,
             "coverage": self.coverage.to_dict() if self.coverage else None,
+            "residual_grids": self.residual_grids,
+            "correlations": self.correlations,
             "uncertainty": {k: v.to_dict() for k, v in self.uncertainty_maps.items()},
             "crossval": self.crossval,
             "ground_truth_check": self.gt_check,
@@ -222,6 +230,7 @@ def build_report(
     default_range_m: float | None = None,
     do_crossval: bool = False,
     crossval_folds: int | None = None,
+    crossval: object | None = None,
     truth_values: dict | None = None,
     grid_step: int | None = None,
     settings: ReportSettings | None = None,
@@ -234,6 +243,9 @@ def build_report(
             map. Defaults to `default_range_m` for every camera.
         truth_values: block key -> true value. Enables the ground-truth
             coverage check; synthetic data only.
+        crossval: an already-computed `CrossValResult` to fold into the report.
+            Takes precedence over `do_crossval`, so a caller that ran the folds
+            itself does not pay for k more solves here.
     """
     cfg = settings or ReportSettings()
     # The loose keyword arguments predate ReportSettings and still win when
@@ -272,16 +284,15 @@ def build_report(
             except (ValueError, KeyError):
                 continue
 
-    cv_dict = None
-    cv_obj = None
-    if do_crossval:
+    cv_obj = crossval
+    if cv_obj is None and do_crossval:
         from mlti_cal.report.crossval import cross_validate
 
         try:
             cv_obj = cross_validate(system, k=crossval_folds)
-            cv_dict = cv_obj.to_dict()
         except ValueError:
-            cv_dict = None
+            cv_obj = None
+    cv_dict = cv_obj.to_dict() if cv_obj is not None else None
 
     gt = None
     if truth_values and cov is not None:
@@ -304,6 +315,22 @@ def build_report(
             "parameters": rows,
             "extrinsic": cam.extrinsic.tolist(),
         }
+
+    # Spatial binning and the correlation slices are computed here, not in the
+    # GUI: the report object is the single source of numbers, so a CLI run and
+    # a GUI run cannot drift apart.
+    grids = {
+        cid: residual_mod.residual_grid(stats, cid, cam.image_size)
+        for cid, cam in system.cameras.items()
+    }
+    corr = None
+    if cov is not None:
+        corr = correlation_blocks(
+            cov,
+            camera_param_names={
+                cid: list(cam.model.param_names) for cid, cam in system.cameras.items()
+            },
+        )
 
     warns = warn_mod.collect_warnings(
         covariance=cov,
@@ -331,4 +358,6 @@ def build_report(
         gt_check=gt,
         warnings=warns,
         camera_estimates=cameras,
+        residual_grids=grids,
+        correlations=corr,
     )

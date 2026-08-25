@@ -6,15 +6,15 @@ import matplotlib
 
 matplotlib.use("QtAgg")
 
-import numpy as np  # noqa: E402
-from matplotlib.backends.backend_qtagg import (  # noqa: E402
+import numpy as np
+from matplotlib.backends.backend_qtagg import (
     FigureCanvasQTAgg,
     NavigationToolbar2QT,
 )
-from matplotlib.figure import Figure  # noqa: E402
-from PySide6.QtCore import QSize, Qt, Signal  # noqa: E402
-from PySide6.QtGui import QBrush, QColor, QIcon, QImage, QPixmap  # noqa: E402
-from PySide6.QtWidgets import (  # noqa: E402
+from matplotlib.figure import Figure
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QIcon, QImage, QPixmap
+from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -51,6 +51,14 @@ class PlotCanvas(QWidget):
         self.figure = Figure(figsize=figsize, layout="constrained")
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # A splitter will happily squeeze a widget to a few pixels. At that
+        # point the axes have less room than their own labels need, constrained
+        # layout bails out, and the plot is unreadable anyway -- so refuse to go
+        # below a size where a figure can still be drawn.
+        self.canvas.setMinimumSize(240, 180)
+        self._tooltip = None
+        self._hovered = None
+        self._hover_connected = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         if toolbar:
@@ -59,9 +67,68 @@ class PlotCanvas(QWidget):
 
     def clear(self):
         self.figure.clear()
+        # Cleared along with the figure: the annotation is an artist on it, and
+        # keeping a stale reference would redraw a tooltip onto axes that no
+        # longer exist.
+        self._tooltip = None
+        self._hovered = None
         return self.figure
 
     def draw(self):
+        self.canvas.draw_idle()
+
+    # -- cell inspection ------------------------------------------------
+    def enable_hover(self) -> None:
+        """
+        Read heatmap cells back by pointing at them.
+
+        A correlation matrix answers "which parameters are entangled" at a
+        glance but not "entangled by how much"; the number matters and there is
+        no room to print several hundred of them. Any figure whose drawer left
+        `hover_grids` on it becomes inspectable -- the canvas asks the grid to
+        describe the cell rather than working out what it contains, so the
+        readout cannot disagree with the picture.
+        """
+        if getattr(self, "_hover_connected", False):
+            return
+        self._hover_connected = True
+        self._tooltip = None
+        self._hovered = None
+        self.canvas.mpl_connect("motion_notify_event", self._on_hover)
+
+    def _on_hover(self, event):
+        grids = getattr(self.figure, "hover_grids", None)
+        cell = None
+        if grids and event.inaxes is not None and event.xdata is not None:
+            for grid in grids:
+                if grid.ax is event.inaxes:
+                    cell = (grid, int(round(event.ydata)), int(round(event.xdata)))
+                    break
+
+        key = None if cell is None else (id(cell[0]), cell[1], cell[2])
+        if key == self._hovered:
+            return  # same cell: repainting on every mouse move is what makes
+            # a hover readout feel sluggish on a large figure.
+        self._hovered = key
+
+        if self._tooltip is not None:
+            self._tooltip.remove()
+            self._tooltip = None
+
+        if cell is not None:
+            grid, row, col = cell
+            text = grid.describe(row, col)
+            if text:
+                self._tooltip = grid.ax.annotate(
+                    text,
+                    xy=(col, row),
+                    xytext=(12, 12),
+                    textcoords="offset points",
+                    fontsize=8,
+                    zorder=100,
+                    annotation_clip=False,
+                    bbox={"boxstyle": "round,pad=0.4", "fc": "#ffffe0", "ec": "#888888"},
+                )
         self.canvas.draw_idle()
 
     def message(self, text: str):
@@ -109,7 +176,7 @@ class ImageView(QScrollArea):
         else:
             self._label.setPixmap(self._pixmap)
 
-    def resizeEvent(self, event):  # noqa: N802 (Qt API)
+    def resizeEvent(self, event):  # Qt API requires this name
         super().resizeEvent(event)
         self._rescale()
 

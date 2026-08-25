@@ -227,3 +227,69 @@ def quiver_field(stats: ResidualStats, camera_id: str, scale: float = 1.0) -> di
         "v": (stats.vectors[sel, 1] * scale).tolist(),
         "magnitude": stats.errors[sel].tolist(),
     }
+
+
+def residual_grid(
+    stats: ResidualStats,
+    camera_id: str,
+    image_size: tuple[int, int],
+    grid: tuple[int, int] | None = None,
+) -> dict:
+    """
+    Residuals binned onto a spatial grid over the sensor.
+
+    Two different questions, which the all-arrows quiver answers neither of
+    cleanly:
+
+      * `rms` -- how big is the error HERE. Cells with no corners are nan, not
+        zero, so an unobserved region reads as "no data" rather than as a
+        perfect fit. That distinction is the whole point on a capture that
+        never covered the image corners.
+      * `mean_u` / `mean_v` -- the MEAN residual vector per cell. Random error
+        averages toward zero; whatever survives the averaging is systematic
+        bias, i.e. model inadequacy. The raw quiver cannot show this because
+        the random part dominates every individual arrow.
+    """
+    w, h = int(image_size[0]), int(image_size[1])
+    if grid is None:
+        cols = 20
+        rows = max(4, int(round(cols * h / max(w, 1))))
+    else:
+        rows, cols = int(grid[0]), int(grid[1])
+
+    shape = (rows, cols)
+    counts = np.zeros(shape, dtype=int)
+    rms = np.full(shape, np.nan)
+    mean_u = np.full(shape, np.nan)
+    mean_v = np.full(shape, np.nan)
+
+    sel = stats.camera_ids == camera_id
+    pts = stats.points[sel]
+    if pts.size:
+        # clip, not discard: a corner detected exactly on the far edge would
+        # otherwise digitize into a column that does not exist.
+        cx = np.clip((pts[:, 0] / max(w, 1) * cols).astype(int), 0, cols - 1)
+        cy = np.clip((pts[:, 1] / max(h, 1) * rows).astype(int), 0, rows - 1)
+        err = stats.errors[sel]
+        vec = stats.vectors[sel]
+        flat = cy * cols + cx
+        counts = np.bincount(flat, minlength=rows * cols).reshape(shape)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            sq = np.bincount(flat, weights=err**2, minlength=rows * cols).reshape(shape)
+            su = np.bincount(flat, weights=vec[:, 0], minlength=rows * cols).reshape(shape)
+            sv = np.bincount(flat, weights=vec[:, 1], minlength=rows * cols).reshape(shape)
+            occupied = counts > 0
+            rms[occupied] = np.sqrt(sq[occupied] / counts[occupied])
+            mean_u[occupied] = su[occupied] / counts[occupied]
+            mean_v[occupied] = sv[occupied] / counts[occupied]
+
+    return {
+        "camera": camera_id,
+        "grid": [rows, cols],
+        "image_size": [w, h],
+        "counts": counts.tolist(),
+        "rms": rms.tolist(),
+        "mean_u": mean_u.tolist(),
+        "mean_v": mean_v.tolist(),
+        "empty_cells": int((counts == 0).sum()),
+    }

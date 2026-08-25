@@ -143,6 +143,8 @@ def compute_covariance(
         sigma_source: "residual" (default) or "assumed".
     """
     r, J = problem.evaluate(with_jacobian=True)
+    # `evaluate` returns None for the Jacobian only when it was not asked for.
+    assert J is not None
     m = r.size
     n = J.shape[1]
     dof = m - n
@@ -232,3 +234,141 @@ def marginal_covariance(
     if idx.size == 0:
         raise KeyError(f"no parameters match prefix {prefix!r}")
     return cov.covariance[np.ix_(idx, idx)], [cov.labels[i] for i in idx], idx
+
+
+_POSE_COMPONENT = {"dtx": "tx", "dty": "ty", "dtz": "tz", "rx": "rx", "ry": "ry", "rz": "rz"}
+
+
+def split_label(label: str) -> tuple[str, str, str]:
+    """
+    Break a parameter label into (kind, owner, component).
+
+    Labels are machine keys -- `intr:cam0.4`, `pose:<frame>:board_A.dtx`. The
+    frame part is a filename stem and routinely contains dots, so the component
+    is split off from the RIGHT and only then is the owner separated.
+    """
+    kind, _, rest = label.partition(":")
+    owner, _, comp = rest.rpartition(".")
+    return kind, owner, comp
+
+
+def frame_aliases(labels: list[str]) -> dict[str, str]:
+    """
+    Short stand-in names for frames, `f00` upward in sorted order.
+
+    Frame keys are capture filename stems -- 42 characters of timestamp is
+    typical -- so printing them in a chart label is not an option. Dropping the
+    frame instead is worse: several pose columns then share one name and a
+    chart of the worst-correlated pairs reads `tx [board_A] vs tx [board_A]`,
+    which names neither of them. The mapping is returned alongside the figures
+    so a reader can get back to the actual image.
+    """
+    frames = set()
+    for label in labels:
+        kind, owner, _ = split_label(label)
+        if kind == "pose":
+            frame, _, _ = owner.rpartition(":")
+            frames.add(frame)
+    return {name: f"f{i:02d}" for i, name in enumerate(sorted(frames))}
+
+
+def pretty_label(
+    label: str,
+    camera_param_names: dict[str, list[str]] | None = None,
+    aliases: dict[str, str] | None = None,
+) -> str:
+    """`intr:cam0.4` -> `k1 (cam0)`. Falls back to the raw label if unparseable."""
+    kind, owner, comp = split_label(label)
+    if kind == "intr":
+        names = (camera_param_names or {}).get(owner)
+        if names is not None and comp.isdigit() and int(comp) < len(names):
+            return f"{names[int(comp)]} ({owner})"
+        return f"p{comp} ({owner})"
+    if kind == "extr":
+        return f"{_POSE_COMPONENT.get(comp, comp)} ({owner})"
+    if kind == "pose":
+        frame, _, board = owner.rpartition(":")
+        tag = (aliases or {}).get(frame, frame)
+        return f"{_POSE_COMPONENT.get(comp, comp)} [{board} {tag}]"
+    return label
+
+
+def correlation_blocks(
+    cov: CovarianceResult,
+    camera_param_names: dict[str, list[str]] | None = None,
+    max_pose_columns: int = 240,
+    top_k: int = 12,
+) -> dict:
+    """
+    The correlation matrix sliced into the two parts worth looking at.
+
+    The full matrix is square in the number of free parameters -- 141 on a
+    small single-camera job, thousands on a real one -- so plotting it whole
+    gives an unlabelled grey square. It also buries the finding: on a typical
+    capture EVERY one of the strongest correlations is a camera parameter
+    against a board pose, not a camera parameter against another camera
+    parameter. So this returns both:
+
+      * `camera`  -- the small labelled square block (intrinsics + extrinsics),
+        where k1/k2 and fx/cx trade-offs live.
+      * `cross`   -- camera parameters against pose parameters, the block the
+        `extreme_correlation` warning is actually about.
+
+    Pose columns are capped at `max_pose_columns`, keeping the columns with the
+    strongest coupling to any camera parameter, because a legible strip matters
+    more than completeness on a 500-frame job.
+    """
+    C = cov.correlation()
+    labels = cov.labels
+    cam_idx = [i for i, name in enumerate(labels) if name.startswith(("intr:", "extr:"))]
+    pose_idx = [i for i, name in enumerate(labels) if name.startswith("pose:")]
+
+    aliases = frame_aliases(labels)
+    pretty = [pretty_label(name, camera_param_names, aliases) for name in labels]
+
+    cross_idx = pose_idx
+    if cam_idx and len(pose_idx) > max_pose_columns:
+        strength = np.abs(C[np.ix_(cam_idx, pose_idx)]).max(axis=0)
+        keep = np.sort(np.argsort(-strength)[:max_pose_columns])
+        cross_idx = [pose_idx[k] for k in keep]
+
+    # Poses arrive interleaved frame-by-frame, which would band the strip into
+    # dozens of alternating one-pose groups. Ordering by board first makes each
+    # board one contiguous, labellable block.
+    def _board_of(i: int) -> str:
+        _, owner, _ = split_label(labels[i])
+        frame, _, board = owner.rpartition(":")
+        return board or owner
+
+    cross_idx = sorted(cross_idx, key=lambda i: (_board_of(i), labels[i]))
+
+    # Column group boundaries, so the strip can be ticked by board rather than
+    # by 132 unreadable per-parameter labels.
+    groups: list[dict] = []
+    for pos, i in enumerate(cross_idx):
+        _, owner, _ = split_label(labels[i])
+        frame, _, board = owner.rpartition(":")
+        name = board or owner
+        if groups and groups[-1]["name"] == name:
+            groups[-1]["end"] = pos + 1
+        else:
+            groups.append({"name": name, "start": pos, "end": pos + 1})
+
+    return {
+        "camera_labels": [pretty[i] for i in cam_idx],
+        "camera_matrix": C[np.ix_(cam_idx, cam_idx)].tolist() if cam_idx else [],
+        "cross_row_labels": [pretty[i] for i in cam_idx],
+        "cross_matrix": C[np.ix_(cam_idx, cross_idx)].tolist() if cam_idx and cross_idx else [],
+        "cross_column_groups": groups,
+        "num_pose_columns": len(pose_idx),
+        "shown_pose_columns": len(cross_idx),
+        "frame_aliases": aliases,
+        "top_pairs": [
+            (
+                pretty_label(a, camera_param_names, aliases),
+                pretty_label(b, camera_param_names, aliases),
+                r,
+            )
+            for a, b, r in cov.top_correlations(k=top_k, threshold=0.0)
+        ],
+    }

@@ -19,6 +19,7 @@ detected and raised rather than filled with a plausible-looking identity.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from collections.abc import Callable
 
 import cv2
@@ -32,6 +33,13 @@ from mlti_cal.models.manifolds import (
 )
 from mlti_cal.problem.settings import InitSettings
 from mlti_cal.problem.types import CalibrationSystem
+
+#: Diagnostics go to the logging module, never to stdout. This is a library:
+#: `initialize_system` is called from the CLI, from the GUI worker thread and
+#: from anyone embedding the package, and only the first of those has a
+#: terminal to print to. The CLI turns these on with `-v`; everything else is
+#: unaffected because a library logger with no handler is silent by default.
+log = logging.getLogger(__name__)
 
 
 class InitializationError(RuntimeError):
@@ -194,7 +202,6 @@ def _average_poses(poses: list[np.ndarray], translation: str = "median") -> np.n
 def initialize_intrinsics(
     system: CalibrationSystem,
     min_views: int | None = None,
-    verbose: bool = False,
     fixed: dict[str, dict[int, float]] | None = None,
     on_progress: Callable[[str], None] | None = None,
     settings: InitSettings | None = None,
@@ -257,8 +264,7 @@ def initialize_intrinsics(
                 )
             except cv2.error as exc:  # pragma: no cover - depends on data
                 rms[cid] = float("nan")
-                if verbose:
-                    print(f"  {cid}: fisheye calibrate failed ({exc})")
+                log.debug("%s: fisheye calibrate failed (%s)", cid, exc)
                 continue
             cam.params = np.array([K[0, 0], K[1, 1], K[0, 2], K[1, 2], *np.asarray(D).ravel()[:4]])
             rms[cid] = float(err)
@@ -296,11 +302,13 @@ def initialize_intrinsics(
             # OpenCV's RMS describes ITS model, not this one, so it is not
             # reported as if it were this camera's initialisation error.
             rms[cid] = float("nan")
-            if verbose:
-                print(
-                    f"  {cid}: {cam.model_name} has no OpenCV fit; took K from a "
-                    f"pinhole fit (RMS {err:.4f} px) and left distortion at its default"
-                )
+            log.debug(
+                "%s: %s has no OpenCV fit; took K from a pinhole fit "
+                "(RMS %.4f px) and left distortion at its default",
+                cid,
+                cam.model_name,
+                err,
+            )
         # The contract, independent of what OpenCV did with the flags: a pinned
         # component holds the value that was asked for, exactly.
         for idx, value in pins.items():
@@ -312,8 +320,7 @@ def initialize_intrinsics(
                 if got == got
                 else f"{cid}: too few usable views, keeping default parameters"
             )
-        if verbose:
-            print(f"  {cid}: OpenCV init RMS = {rms[cid]:.4f} px over {len(obj_pts)} views")
+        log.debug("%s: OpenCV init RMS = %.4f px over %d views", cid, rms[cid], len(obj_pts))
     return rms
 
 
@@ -488,7 +495,6 @@ def initialize_board_poses(
 def initialize_system(
     system: CalibrationSystem,
     do_intrinsics: bool = True,
-    verbose: bool = False,
     fixed_intrinsics: dict[str, dict[int, float]] | None = None,
     on_progress: Callable[[str], None] | None = None,
     settings: InitSettings | None = None,
@@ -504,11 +510,9 @@ def initialize_system(
     cfg = settings or InitSettings()
     report: dict = {"settings": cfg.to_dict()}
     if do_intrinsics:
-        if verbose:
-            print("Initialising intrinsics with OpenCV...")
+        log.debug("initialising intrinsics with OpenCV")
         report["intrinsics_rms"] = initialize_intrinsics(
             system,
-            verbose=verbose,
             fixed=fixed_intrinsics,
             on_progress=on_progress,
             settings=cfg,
@@ -530,10 +534,10 @@ def initialize_system(
         on_progress("placing the boards...")
     initialize_board_poses(system, pnp, settings=cfg)
     report["board_poses"] = len(system.board_poses)
-    if verbose:
-        print(
-            f"  PnP poses: {report['pnp_solved']}, "
-            f"board poses: {report['board_poses']}, "
-            f"extrinsic support: {report['extrinsic_support']}"
-        )
+    log.debug(
+        "PnP poses: %s, board poses: %s, extrinsic support: %s",
+        report["pnp_solved"],
+        report["board_poses"],
+        report["extrinsic_support"],
+    )
     return report

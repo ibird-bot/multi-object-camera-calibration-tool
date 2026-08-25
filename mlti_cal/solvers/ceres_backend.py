@@ -101,7 +101,7 @@ if pyceres is not None:
                     sizes.append(blk.value.size)
             self.set_parameter_block_sizes(sizes)
 
-        def Evaluate(self, parameters, residuals, jacobians):  # noqa: N802 (Ceres API)
+        def Evaluate(self, parameters, residuals, jacobians):  # Ceres API requires this name
             # Rebuild core-shaped values from the split Ceres blocks.
             values: list[np.ndarray] = []
             i = 0

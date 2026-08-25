@@ -28,6 +28,13 @@ class Option:
     minimum: float | None = None
     maximum: float | None = None
     per_choice: dict[str, str] = field(default_factory=dict)
+    #: Optional grouping key, read only when a catalog is rendered as TABLE
+    #: COLUMNS rather than as a form -- which today is the board-geometry
+    #: catalog on each detector kind. Two kinds whose fields mean the same thing
+    #: under different names (a Charuco board's `squares_x`, a dot grid's
+    #: `circles_x`) share a column by declaring the same `column`. Left None the
+    #: field gets a column of its own, named after it.
+    column: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -39,6 +46,7 @@ class Option:
             "min": self.minimum,
             "max": self.maximum,
             "per_choice": self.per_choice,
+            "column": self.column,
         }
 
 

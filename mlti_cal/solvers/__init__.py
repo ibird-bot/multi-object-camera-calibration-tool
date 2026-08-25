@@ -3,8 +3,8 @@
 # Imported for side effect: each module registers itself on import. Failures
 # are swallowed per-backend so one missing optional dependency cannot make the
 # package unimportable -- `backend_status()` reports what is actually usable.
-from mlti_cal.solvers import scipy_backend  # noqa: F401,E402
-from mlti_cal.solvers.base import (  # noqa: F401
+from mlti_cal.solvers import scipy_backend  # noqa: F401
+from mlti_cal.solvers.base import (
     IterationRecord,
     SolveOptions,
     SolverBackend,
@@ -17,11 +17,6 @@ from mlti_cal.solvers.base import (  # noqa: F401
 
 try:  # pragma: no cover - depends on environment
     from mlti_cal.solvers import ceres_backend  # noqa: F401
-except ImportError:  # pragma: no cover
-    pass
-
-try:  # pragma: no cover - depends on environment
-    from mlti_cal.solvers import gtsam_backend  # noqa: F401
 except ImportError:  # pragma: no cover
     pass
 

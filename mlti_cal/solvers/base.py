@@ -9,7 +9,6 @@ two different problems, which is the failure this design exists to prevent.
 
 from __future__ import annotations
 
-import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -147,12 +146,6 @@ class SolverBackend(ABC):
 
     @abstractmethod
     def solve(self, problem: Problem, options: SolveOptions | None = None) -> SolveResult: ...
-
-    # -- helpers for subclasses -------------------------------------------
-    @staticmethod
-    def _start(problem: Problem) -> tuple[float, float, float]:
-        r = problem.residuals_only()
-        return time.perf_counter(), 0.5 * float(r @ r), per_corner_rms(problem)
 
 
 _BACKENDS: dict[str, type[SolverBackend]] = {}

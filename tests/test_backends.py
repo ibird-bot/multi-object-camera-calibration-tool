@@ -39,7 +39,10 @@ def test_backend_status_reports_every_backend():
     status = backend_status()
     assert "scipy" in status and status["scipy"][0]
     assert "ceres" in status
-    assert "gtsam" in status, "the gtsam adapter must be listed even when unusable"
+    # Registration is what is asserted, not usability: a backend whose optional
+    # dependency is missing must still appear, with the reason, rather than
+    # vanishing and reading as "never supported".
+    assert set(status) == {"ceres", "scipy"}
 
 
 @pytest.mark.parametrize("name", [n for n, (ok, _) in backend_status().items() if ok])
@@ -198,89 +201,3 @@ def test_scipy_supports_partial_rotation_fix():
     n_before = problem.num_free_params
     get_backend("scipy").solve(problem, SolveOptions(max_iterations=40))
     assert problem.num_free_params == n_before
-
-
-# ---------------------------------------------------------------------------
-# GTSAM convention conversion
-#
-# The adapter itself cannot run on this machine (no gtsam wheel for
-# Windows/py3.12), but its two conversions are pure functions of numpy arrays,
-# so the maths IS verifiable here. GTSAM's Pose3 retract is T * Exp([omega; v])
-# with the FULL SE(3) exponential and rotation first; that is reproduced below
-# using this repo's own se3_exp with the arguments swapped into our
-# [translation; rotation] order.
-# ---------------------------------------------------------------------------
-
-
-def test_core_to_gtsam_jacobian_matches_finite_difference():
-    from mlti_cal.models.manifolds import (
-        d_point_d_pose_tangent,
-        pose_to_matrix,
-        quat_to_matrix,
-        se3_exp,
-    )
-    from mlti_cal.solvers.gtsam_backend import core_to_gtsam_jacobian
-
-    rng = np.random.default_rng(808)
-    for _ in range(20):
-        t = rng.normal(size=3)
-        from mlti_cal.models.manifolds import matrix_to_quat, so3_exp
-
-        q = matrix_to_quat(so3_exp(rng.normal(scale=0.7, size=3)))
-        pose = np.concatenate([t, q])
-        R = quat_to_matrix(q)
-        X = rng.normal(size=(6, 3)) + np.array([0, 0, 3.0])
-
-        J_core = d_point_d_pose_tangent(np.eye(3), R, X).reshape(-1, 6)
-        J_gtsam = core_to_gtsam_jacobian(J_core, R)
-
-        def fn(xi, pose=pose, X=X):
-            # GTSAM: xi = [omega(3); v(3)], T_new = T * Exp_full([v; omega])
-            T = pose_to_matrix(pose) @ se3_exp(np.concatenate([xi[3:6], xi[0:3]]))
-            return ((T[:3, :3] @ X.T).T + T[:3, 3]).ravel()
-
-        eps = 1e-7
-        Jn = np.zeros_like(J_gtsam)
-        for i in range(6):
-            a, b = np.zeros(6), np.zeros(6)
-            a[i], b[i] = eps, -eps
-            Jn[:, i] = (fn(a) - fn(b)) / (2 * eps)
-        assert np.allclose(Jn, J_gtsam, atol=1e-6), np.abs(Jn - J_gtsam).max()
-
-
-def test_dropping_the_rotation_on_translation_columns_is_detectable():
-    """The `@ R` in the conversion must matter, or the test above is vacuous."""
-    from mlti_cal.models.manifolds import matrix_to_quat, quat_to_matrix, so3_exp
-    from mlti_cal.solvers.gtsam_backend import core_to_gtsam_jacobian
-
-    rng = np.random.default_rng(99)
-    R = quat_to_matrix(matrix_to_quat(so3_exp(np.array([0.4, -0.3, 0.9]))))
-    J_core = rng.normal(size=(12, 6))
-    correct = core_to_gtsam_jacobian(J_core, R)
-    naive = np.hstack([J_core[:, 3:6], J_core[:, 0:3]])  # permute only, no @R
-    assert not np.allclose(correct, naive, atol=1e-6)
-
-
-def test_gtsam_covariance_basis_roundtrip():
-    from mlti_cal.models.manifolds import matrix_to_quat, quat_to_matrix, so3_exp
-    from mlti_cal.solvers.gtsam_backend import (
-        core_to_gtsam_jacobian,
-        gtsam_to_core_covariance,
-    )
-
-    rng = np.random.default_rng(1234)
-    R = quat_to_matrix(matrix_to_quat(so3_exp(np.array([0.2, 0.5, -0.1]))))
-    J_core = rng.normal(size=(30, 6))
-    # Sigma_core from the core Jacobian, Sigma_gtsam from the converted one;
-    # mapping the latter back must reproduce the former exactly.
-    cov_core = np.linalg.inv(J_core.T @ J_core)
-    J_g = core_to_gtsam_jacobian(J_core, R)
-    cov_gtsam = np.linalg.inv(J_g.T @ J_g)
-    assert np.allclose(gtsam_to_core_covariance(cov_gtsam, R), cov_core, atol=1e-9)
-
-
-def test_gtsam_reports_itself_unavailable_with_a_usable_message():
-    ok, why = backend_status()["gtsam"]
-    if ok:  # pragma: no cover - only on a conda/WSL machine
-        pytest.skip("gtsam is installed here")
-    assert "conda-forge" in why and "pygtsam" in why

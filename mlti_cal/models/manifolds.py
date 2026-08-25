@@ -41,8 +41,12 @@ Why this exact choice -- empirically forced, not aesthetic
     matches the storage above. This was confirmed by feeding analytic Jacobians
     to Ceres' own gradient checker and getting agreement to ~1e-14.
 
-    GTSAM's Pose3 tangent is rotation-first AND uses the coupled exponential,
-    so `solvers/gtsam_backend.py` converts explicitly rather than assuming.
+    Worth knowing if another backend is ever added: GTSAM's Pose3 tangent is
+    rotation-first AND uses the coupled exponential, so an adapter for it would
+    have to permute the columns and rotate the translation ones, not merely
+    reinterpret them. That adapter existed here once and was removed; the
+    conversion is not hard, but it is silent when wrong -- the solve still
+    converges and only the reported covariance comes out in the wrong basis.
 
 Ambient vs tangent Jacobians
     A Ceres CostFunction is handed AMBIENT-sized Jacobian buffers (7 columns
@@ -58,7 +62,8 @@ Ambient vs tangent Jacobians
 
 Consistency note
     The full SE(3) exp/log (`se3_exp`, `se3_log`) are retained below because
-    they are the right tool for interpolation and for comparing against GTSAM,
+    they are the right tool for interpolation and for comparing against
+    libraries that use the coupled retraction,
     but they are NOT the retraction. `pose_plus` is the single source of truth;
     finite-difference tests must perturb through it.
 """
@@ -351,12 +356,6 @@ def pose_inverse(p: np.ndarray) -> np.ndarray:
 def pose_compose(pa: np.ndarray, pb: np.ndarray) -> np.ndarray:
     """Pose of  T(pa) @ T(pb)."""
     return matrix_to_pose(pose_to_matrix(pa) @ pose_to_matrix(pb))
-
-
-def transform_points(p: np.ndarray, X: np.ndarray) -> np.ndarray:
-    """Apply pose `p` to an (N,3) array of points."""
-    T = pose_to_matrix(p)
-    return X @ T[:3, :3].T + T[:3, 3]
 
 
 def skew_stack(X: np.ndarray) -> np.ndarray:

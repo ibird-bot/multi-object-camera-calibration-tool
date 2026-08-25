@@ -140,6 +140,8 @@ class ScipyBackend(SolverBackend):
             _, J = problem.evaluate(
                 with_jacobian=True, tangent_transform=right_jacobian_transforms(deltas)
             )
+            # `evaluate` returns None only when the Jacobian was not asked for.
+            assert J is not None
             # 'lm' and tr_solver='exact' are dense-only and reject sparse input.
             return J.toarray() if dense_jac else sp.csr_matrix(J)
 

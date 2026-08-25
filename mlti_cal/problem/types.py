@@ -49,8 +49,15 @@ class Camera:
     id: str
     model_name: str
     image_size: tuple[int, int]  # (width, height)
-    params: np.ndarray | None = None
-    extrinsic: np.ndarray | None = None  # T_cam_rig, 7-vector
+    # Typed as plain arrays even though None is an accepted ARGUMENT: passing
+    # None means "give me the default", and `__post_init__` below fills both in
+    # before the object is ever handed out, so no attribute is ever None once a
+    # Camera exists. Declaring them Optional described the constructor rather
+    # than the object, and made every one of the ~25 uses downstream
+    # (`cam.params[3] = ...`, `model.matrix(cam.params)`) look like a possible
+    # None dereference -- noise that hides a real one.
+    params: np.ndarray = None  # type: ignore[assignment]
+    extrinsic: np.ndarray = None  # type: ignore[assignment]  # T_cam_rig, 7-vector
     is_reference: bool = False
 
     def __post_init__(self) -> None:
@@ -193,13 +200,6 @@ class CalibrationSystem:
         for o in self.observations:
             seen.setdefault((o.frame, o.board), None)
         return list(seen)
-
-    def observations_for(self, frame: str, camera: str | None = None) -> list[Observation]:
-        return [
-            o
-            for o in self.observations
-            if o.frame == frame and (camera is None or o.camera == camera)
-        ]
 
     @property
     def num_observed_points(self) -> int:

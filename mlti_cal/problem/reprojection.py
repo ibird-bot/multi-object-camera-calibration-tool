@@ -198,11 +198,14 @@ def build_problem(
 
     for obs in system.observations:
         cam = system.cameras[obs.camera]
-        board = system.boards[obs.board]
+        # Not `board`: the loop above binds that name to a board ID string, and
+        # reusing it here for the Board object made the two loops read as if
+        # they shared a variable when they share only a name.
+        obs_board = system.boards[obs.board]
         problem.add_residual(
             ReprojectionResidual(
                 model=cam.model,
-                object_points=board.object_points[obs.point_ids],
+                object_points=obs_board.object_points[obs.point_ids],
                 image_points=obs.image_points,
                 camera_id=obs.camera,
                 frame=obs.frame,

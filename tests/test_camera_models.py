@@ -166,7 +166,19 @@ def test_projective_models_can_see_past_ninety_degrees(name):
     assert not np.any(model.valid_mask(behind))
 
 
-@pytest.mark.parametrize("name", NEW_MODELS)
+#: Same models as `NEW_MODELS`, but Thin Prism carries the `slow` marker. With
+#: 16 intrinsics per camera it needs thousands of scipy iterations and takes
+#: ~150s of a ~250s suite -- 60% of the total runtime for one parameter set.
+#: Marked rather than deleted or shrunk: it is the only end-to-end check that
+#: the widest parameterisation converges, so it still runs on every full local
+#: run and on the nightly job, just not on the per-push one.
+END_TO_END_MODELS = [
+    pytest.param(name, marks=pytest.mark.slow) if name == "thin_prism" else name
+    for name in NEW_MODELS
+]
+
+
+@pytest.mark.parametrize("name", END_TO_END_MODELS)
 def test_calibrates_end_to_end_to_the_noise_floor(name):
     """
     The real check: generate from known parameters, calibrate, hit the floor.

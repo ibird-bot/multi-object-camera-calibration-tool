@@ -15,6 +15,7 @@ GUI run cannot disagree. This is also what makes batch/CI calibration possible.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -147,7 +148,7 @@ def cmd_demo(args) -> int:
         outlier_fraction=args.outliers,
         seed=args.seed,
     )
-    initialize_system(system, verbose=args.verbose)
+    initialize_system(system)
     args.pixel_noise = args.noise
     return _solve_and_report(system, args, truth=_truth_blocks(gt))
 
@@ -157,10 +158,10 @@ def cmd_calibrate(args) -> int:
     print(
         f"config: {config.name} -- {len(config.cameras)} camera(s), {len(config.boards)} board(s)"
     )
-    system, stats = build_system_from_config(config, verbose=args.verbose)
+    system, stats = build_system_from_config(config)
     for cid, s in stats["per_camera"].items():
         print(f"  {cid}: {s['detections']} detections over {s['images']} images")
-    initialize_system(system, verbose=args.verbose)
+    initialize_system(system)
     args.pixel_noise = config.pixel_noise_std
     return _solve_and_report(system, args)
 
@@ -215,7 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     def common(sp):
-        sp.add_argument("--backend", default="scipy", help="scipy | ceres | gtsam")
+        sp.add_argument("--backend", default="scipy", help="scipy | ceres")
         sp.add_argument("--max-iterations", type=int, default=300, dest="max_iterations")
         sp.add_argument("--loss", default=None, help="trivial | huber | cauchy | soft_l1")
         sp.add_argument("--loss-scale", type=float, default=2.0, dest="loss_scale")
@@ -276,6 +277,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    # The ONE place a handler is installed. Library modules only ever call
+    # `log.debug(...)`; without this they are silent, which is what an embedder
+    # importing the package wants. `-v` is what turns them on for a terminal
+    # run, and it also still drives the solver's own iteration printing.
+    logging.basicConfig(
+        level=logging.DEBUG if getattr(args, "verbose", False) else logging.WARNING,
+        format="%(message)s",
+        stream=sys.stderr,
+    )
     return args.func(args)
 
 

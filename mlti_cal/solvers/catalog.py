@@ -70,7 +70,7 @@ COMMON_OPTIONS: list[Option] = [
         minimum=1,
         maximum=64,
         when="Threads for Jacobian evaluation and the linear solve. Honoured by Ceres "
-        "only; scipy and the GTSAM adapter ignore it. 1 by default so a run is bit-"
+        "only; scipy ignores it. 1 by default so a run is bit-"
         "for-bit reproducible -- raise it for large rigs and accept that "
         "floating-point summation order, and so the last digits, may change.",
     ),
@@ -237,24 +237,6 @@ CATALOG: dict[str, dict] = {
             ),
         ],
     },
-    "gtsam": {
-        "summary": (
-            "GTSAM factor-graph optimiser. NOT RUNNABLE on Windows/py3.12 -- no "
-            "pip wheel exists and 'pygtsam' is not a real package. Install via "
-            "Miniforge (conda install -c conda-forge gtsam) or use WSL. The "
-            "adapter is written but has never been executed."
-        ),
-        "options": [
-            Option(
-                name="optimizer",
-                kind="choice",
-                default="LEVENBERG_MARQUARDT",
-                choices=["LEVENBERG_MARQUARDT", "GAUSS_NEWTON", "DOGLEG"],
-                when="GAUSS_NEWTON converges fastest from a good initialisation but "
-                "diverges from a poor one; LM is the safe default.",
-            ),
-        ],
-    },
 }
 
 
@@ -293,8 +275,7 @@ LOSS_CATALOG = [
 
 #: Which COMMON options each backend actually READS, verified against the
 #: adapters rather than assumed. scipy passes ftol/gtol/xtol to
-#: `least_squares` but has no thread count; the GTSAM adapter sets only a
-#: relative error tolerance.
+#: `least_squares` but has no thread count; Ceres reads all four.
 #:
 #: This is not tidiness. Rendering `num_threads` next to scipy shows a control
 #: that silently does nothing, which is precisely the kind of quiet lie the
@@ -307,7 +288,6 @@ HONOURED_COMMON: dict[str, tuple[str, ...]] = {
         "parameter_tolerance",
         "num_threads",
     ),
-    "gtsam": ("function_tolerance",),
 }
 
 

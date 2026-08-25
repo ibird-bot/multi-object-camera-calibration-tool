@@ -36,7 +36,11 @@ class ParameterBlock:
     value: np.ndarray
     kind: str = EUCLIDEAN
     constant: bool = False
-    free_mask: np.ndarray | None = None  # (tangent_size,) bool; None => all free
+    # None is an accepted ARGUMENT meaning "all components free"; by the end of
+    # `__post_init__` it is always an array. Same reasoning as `Camera.params`
+    # in problem/types.py -- typing it Optional described the constructor, not
+    # the block, and made `free_mask.sum()` read as a possible None deref.
+    free_mask: np.ndarray = None  # type: ignore[assignment]  # (tangent_size,) bool
 
     def __post_init__(self) -> None:
         self.value = np.asarray(self.value, dtype=float).ravel().copy()
@@ -72,15 +76,6 @@ class ParameterBlock:
             self.value = pose_plus(self.value, delta_full)
         else:
             self.value = self.value + delta_full
-
-    def set_free(self, names_or_idx=None) -> None:
-        """Mark all components free (default) or only the given tangent indices."""
-        self.constant = False
-        if names_or_idx is None:
-            self.free_mask[:] = True
-        else:
-            self.free_mask[:] = False
-            self.free_mask[np.asarray(names_or_idx, dtype=int)] = True
 
 
 class ResidualBlock(ABC):
@@ -230,19 +225,6 @@ class Problem:
         return self.evaluate(with_jacobian=False)[0]
 
     # -- state -------------------------------------------------------------
-    def apply_delta(self, delta_free: np.ndarray) -> None:
-        """Retract every block by its slice of a free-column delta vector."""
-        offsets, ncols = self.column_layout()
-        if delta_free.size != ncols:
-            raise ValueError(f"delta has {delta_free.size} entries, expected {ncols}")
-        for key, blk in self.blocks.items():
-            if key not in offsets:
-                continue
-            sel = blk.free_indices
-            full = np.zeros(blk.tangent_size)
-            full[sel] = delta_free[offsets[key] : offsets[key] + sel.size]
-            blk.plus(full)
-
     def scatter(self, delta_free: np.ndarray) -> dict[str, np.ndarray]:
         """Free-column vector -> per-block FULL tangent vectors (zeros for fixed)."""
         offsets, ncols = self.column_layout()

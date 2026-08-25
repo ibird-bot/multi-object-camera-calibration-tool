@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 03:00 UTC daily. The nightly job is the one that runs the `slow` tests, so
+    # the per-push job can stay under a minute without those checks being lost.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install ruff mypy
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format
+        run: ruff format --check .
+      - name: mypy
+        # `[gui]` and not just `[dev]`: mypy checks `mlti_cal.gui.*`, and without
+        # PySide6 present every Qt import in those modules is an unresolved-import
+        # error. Most gui modules are on the debt list and would swallow it, but
+        # `log_console` is clean and would fail the job -- so the checker has to
+        # see the same tree a developer sees.
+        run: |
+          pip install -e ".[gui,dev]"
+          mypy
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # PySide6 needs these to load its platform plugins even in offscreen mode;
+      # opencv needs libGL. Without them the GUI tests abort rather than fail.
+      - name: system libraries for offscreen Qt and OpenCV
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libegl1 libxkbcommon-x11-0 libdbus-1-3
+      # No `[ceres]`: pyceres has no manylinux wheel and building Ceres here
+      # would add minutes to every push. `backend_status()` reports it as
+      # unusable and the scipy backend covers the same problem, which is exactly
+      # the fallback path a user without Ceres gets -- so this job tests it.
+      - run: pip install -e ".[gui,dev]"
+      - name: pytest (fast)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -m "not slow" --cov --cov-report=term-missing
+
+  slow:
+    # Only on the nightly schedule and on manual runs: these are minutes-long
+    # end-to-end solves, and putting them on every push is how a team ends up
+    # switching CI off.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: system libraries for offscreen Qt and OpenCV
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libegl1 libxkbcommon-x11-0 libdbus-1-3
+      - run: pip install -e ".[gui,dev]"
+      - name: pytest (full suite)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest
+
+  headless:
+    # The job that keeps the extras split honest. pyproject and the README both
+    # promise that `pip install -e .` alone gives a working calibration run --
+    # no Qt, no matplotlib, no pyceres. Nothing else here tests that claim: the
+    # `test` job installs `[gui,dev]`, and so does every developer machine. The
+    # GUI tests skip themselves via `importorskip`, so what remains is the core.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: sudo apt-get update && sudo apt-get install -y libgl1
+      - name: install the CORE only, plus the test runner
+        run: |
+          pip install -e .
+          pip install pytest
+      - name: no Qt, matplotlib or pyceres may be present
+        run: |
+          ! pip show PySide6 pyqtgraph matplotlib pyceres 2>/dev/null | grep -q Name
+      - name: the headless core must calibrate
+        run: |
+          pytest -m "not slow"
+          mlti-cal demo --cameras 2 --frames 6 -o "$RUNNER_TEMP/demo"

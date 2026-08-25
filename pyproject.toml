@@ -11,26 +11,41 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Youssef El Assfouri" }]
 requires-python = ">=3.12"
+# The headless core and nothing else. A `pip install mlti-object-cal` must give
+# a working calibration run -- detection, bootstrap, scipy solve, report -- with
+# no Qt, no plotting stack and no compiled Ceres in the environment. Anything
+# whose absence is survivable belongs in an extra below, not here.
 dependencies = [
     "numpy>=1.26",
     "scipy>=1.14",
     # 5.x line carries the OpenCV-5 aruco API the detectors target. Verified: plain
     # pin resolves to a stable wheel (5.0.0.93), no --pre needed.
     "opencv-contrib-python==5.*",
-    "matplotlib>=3.9",
-    "pyceres>=2.6",
 ]
 
 [project.optional-dependencies]
 # Qt lives here, never in `dependencies`: the core (detectors/models/problem/
-# solvers/report/project/io) must import and run with zero Qt present.
+# solvers/report/io) must import and run with zero Qt present. matplotlib is
+# here for the same reason -- `gui/widgets.py` is its only importer, and it
+# pulls in a windowing backend nobody running headless asked for.
 gui = [
     "PySide6>=6.11",
     "pyqtgraph>=0.13",
+    "matplotlib>=3.9",
+]
+# Optional because the code already treats it as optional: `solvers/__init__.py`
+# guards the import and `backend_status()` reports the backend as unusable when
+# it is missing. pyceres needs a compiled Ceres, which is by far the most likely
+# thing to break a first `pip install`, so requiring it here would fail installs
+# for the many users who are happy with the scipy backend.
+ceres = [
+    "pyceres>=2.6",
 ]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest-cov>=5.0",
 ]
 
 [project.scripts]
@@ -51,3 +66,92 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `slow` is opt-out, never opt-in: a test excluded by default is a test that
+# rots. The full suite still runs by default here and on the nightly job; only
+# the per-push CI job passes `-m "not slow"` to stay under a minute.
+markers = [
+    "slow: end-to-end solves measured in minutes; deselected on the per-push CI job",
+]
+
+[tool.coverage.run]
+source = ["mlti_cal"]
+# The GUI is exercised through offscreen Qt in tests/test_gui.py, but its
+# coverage number is dominated by widget construction and says little; measured
+# anyway rather than excluded, so a drop in the logic underneath still shows.
+omit = ["*/__main__.py"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@abstractmethod",
+]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["mlti_cal"]
+# Deliberately not --strict. The goal is catching real type errors in a codebase
+# that was not written against a checker, not a months-long annotation campaign.
+# `disallow_untyped_defs` stays off; the annotations that exist are checked, and
+# the settings below are the ones that catch actual bugs rather than style.
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+# `warn_unreachable` is deliberately OFF. cv2's bundled stubs declare
+# non-Optional returns for functions that genuinely return None --
+# `findHomography` and `detectBoard` among them -- so it flags every correct
+# `if H is None` guard as dead code. A setting whose advice is "delete this
+# working null check" is worse than no setting.
+
+[[tool.mypy.overrides]]
+# None of these ship type information (cv2's bundled stubs are partial and
+# disagree with the runtime API on the aruco module in particular).
+# PySide6 DOES ship stubs, so this entry does nothing when the `gui` extra is
+# installed. It exists for the case where it is not: without it, running mypy on
+# a core-only install turns every Qt import into an unresolved-import error in
+# `gui/log_console.py`, which is clean and therefore not silenced by the debt
+# list below -- a confusing failure about the wrong thing.
+module = ["cv2.*", "scipy.*", "pyceres.*", "pyqtgraph.*", "matplotlib.*", "PySide6.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# THE DEBT LIST. Everything NOT named here is type-checked in CI and must stay
+# clean -- that is 37 of the 54 modules, including the whole of `models/`, the
+# problem graph, the initialiser, the residuals, the solver interface and the
+# CLI. These 17 are the ones that still had errors when the checker was first
+# turned on, and they are listed individually so that adding a new module puts
+# it under the checker by default rather than outside it.
+#
+# The remaining errors are, in rough order of count:
+#   * Qt enum shorthand -- `Qt.Checked` rather than `Qt.CheckState.Checked`.
+#     Correct at runtime, rejected by PySide6's stubs. Mechanical to fix, and
+#     touching ~70 call sites in the view code is its own change.
+#   * cv2 stub inaccuracies that the per-module `ignore_missing_imports` above
+#     cannot reach, because cv2 DOES ship stubs -- they are just wrong about
+#     `SimpleBlobDetector_create` and the `findChessboardCorners` overloads.
+#   * A handful of genuine loose types in `report/uncertainty.py` and
+#     `gui/settings_panel.py` worth fixing properly rather than silencing.
+#
+# Shrink this list; do not grow it. Deleting a line and getting a clean run is
+# the whole workflow.
+module = [
+    "mlti_cal.detectors.checkerboard",
+    "mlti_cal.detectors.circle_grid",
+    "mlti_cal.detectors.registry",
+    "mlti_cal.detectors.settings",
+    "mlti_cal.gui.app",
+    "mlti_cal.gui.detection_view",
+    "mlti_cal.gui.detector_dialog",
+    "mlti_cal.gui.noise_dialog",
+    "mlti_cal.gui.optimization_view",
+    "mlti_cal.gui.report_view",
+    "mlti_cal.gui.session",
+    "mlti_cal.gui.settings_dialog",
+    "mlti_cal.gui.settings_panel",
+    "mlti_cal.gui.widgets",
+    "mlti_cal.io.config",
+    "mlti_cal.report.report",
+    "mlti_cal.report.uncertainty",
+]
+ignore_errors = true

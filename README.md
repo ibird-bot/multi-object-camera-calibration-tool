@@ -16,17 +16,21 @@ uncertainty, residual maps, coverage and cross-validated held-out error.
 ### What it does
 
 - **Multi-camera calibration** for rigs of any size, not just stereo pairs
-- **Multi-object calibration**: several Charuco boards in one session, with
-  marker ID collision checking
+- **Multi-object calibration**: several targets in one session, with marker ID
+  collision checking and refusal of any layout that cannot be told apart
+- **Three target types**: Charuco boards, plain checkerboards and dot grids,
+  mixable in the same images -- coded boards are detected first and masked out
+  before the uncoded detectors search
 - **Intrinsic and extrinsic calibration** solved jointly in one optimisation
 - **Eight camera models**, including pinhole, fisheye, double sphere and FOV
-- **Three solver backends**: scipy, Ceres and GTSAM
+- **Two solver backends**: scipy and Ceres
 - **Uncertainty reporting** instead of a single RMS reprojection error
 - **Desktop GUI** built with PySide6, plus a headless command line
 
 Keywords: camera calibration, multi-camera calibration, multi-object
 calibration, stereo calibration, extrinsic calibration, intrinsic calibration,
-Charuco, ArUco, bundle adjustment, fisheye calibration, OpenCV, Python.
+Charuco, ArUco, checkerboard, circle grid, bundle adjustment, fisheye
+calibration, OpenCV, Python.
 
 ## Requirements
 
@@ -45,9 +49,17 @@ python -m venv .venv
 .venv\Scripts\activate            # Windows
 # source .venv/bin/activate       # Linux / macOS
 
-pip install -r requirements.txt
-pip install -e .
+pip install -e ".[gui]"
 ```
+
+The extras decide what you get:
+
+| Command | What it installs |
+|---|---|
+| `pip install -e .` | Headless core: detection, bootstrap, the scipy solver, the report engine, the CLI. No Qt. |
+| `pip install -e ".[gui]"` | The above plus the desktop GUI (PySide6, pyqtgraph, matplotlib). |
+| `pip install -e ".[ceres]"` | Adds the Ceres backend. Needs a compiled Ceres, so it is deliberately optional -- without it `mlti-cal backends` lists Ceres as unusable and the scipy backend solves the identical problem. |
+| `pip install -e ".[dev]"` | pytest, ruff, mypy, coverage. |
 
 ## Running the GUI
 
@@ -63,9 +75,42 @@ or, since the package installs an entry point:
 mlti-cal-gui
 ```
 
-The application opens on the Setup tab, where you declare your cameras and
-calibration boards. Detection, optimisation and the report follow in their own
-tabs.
+The application opens on the "Setup & Detection" tab, where you declare your
+cameras and calibration boards and run detection over their images.
+Optimisation and the report follow in their own tabs.
+
+## The report
+
+A low RMS is compatible with a badly wrong calibration, so the report tab
+answers "can I trust this?" rather than printing one number. Seven figures,
+each also written to disk by **Export...**:
+
+| Figure | What it answers |
+|---|---|
+| Projection uncertainty | How far a projected point could be wrong at a stated range, per pixel |
+| Residual field | Per-corner error arrows; structure here is model inadequacy RMS cannot see |
+| Residual map | Per-cell RMS across the sensor, and the per-cell **mean** vector -- averaging cancels random error, so what survives is systematic bias |
+| Correlations | Which parameters the data cannot tell apart: the labelled camera block, the worst pairs, and camera parameters against board poses |
+| Coverage | Where corners were actually observed, and how varied the board tilts were |
+| Residual distribution | Histogram and Q-Q against a normal; heavy tails mean outliers or unmodelled error |
+| Error vs radius | Growth toward the edge means the distortion model cannot represent the lens |
+
+Two conventions worth knowing:
+
+- **Unobserved regions are masked, never zero.** A sensor cell with no corners
+  is drawn grey. Zero would read as a perfect fit in exactly the area the
+  calibration knows nothing about.
+- **Correlations include board poses.** On a typical capture the strongest
+  correlations are a camera parameter against a board pose -- a static board
+  makes the principal point indistinguishable from a board translation -- so a
+  camera-only matrix would hide the finding. Hover any cell for the exact
+  coefficient.
+
+Everything is computed headlessly and stored in `report.json`, so a CLI run and
+a GUI run produce identical numbers. Export writes `report.json`,
+`report.txt`, `calibration.json`, `calibration.yaml` (OpenCV `FileStorage`) and
+one PNG per figure, each rendered at a size chosen for its content rather than
+inherited from the window.
 
 ## Supported camera models
 
@@ -99,9 +144,17 @@ Stated explicitly, because getting these wrong is silent:
 ## Tests
 
 ```bash
-pip install pytest
+pip install -e ".[dev]"
 pytest
 ```
+
+The end-to-end solves marked `slow` take minutes. To skip them:
+
+```bash
+pytest -m "not slow"
+```
+
+That is what CI runs on every push; the full suite runs nightly.
 
 ## License
 

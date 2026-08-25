@@ -17,6 +17,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+# matplotlib is a `gui` extra, and the headless CI job installs without it.
+# figures.py imports it lazily so the core stays importable there, but these
+# tests actually render, so the whole module has nothing to say without it.
+pytest.importorskip("matplotlib")
+
 from mlti_cal.io.synthetic import generate_dataset
 from mlti_cal.problem.initialize import initialize_system
 from mlti_cal.problem.reprojection import build_problem

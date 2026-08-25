@@ -19,8 +19,9 @@ the caller, so drawing does not depend on which backend imported first.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -274,10 +275,11 @@ class HoverGrid:
     picture. Ignored entirely by the exporter, which has no cursor.
     """
 
-    ax: object
-    matrix: object
-    row_labels: list
-    col_labels: list
+    ax: Any
+    #: Row-major, indexed [row][col]. A nested list or a 2-D array both work.
+    matrix: Sequence[Sequence[float]]
+    row_labels: Sequence[str]
+    col_labels: Sequence[str]
     value_fmt: str = "{:+.3f}"
     value_name: str = "correlation"
 

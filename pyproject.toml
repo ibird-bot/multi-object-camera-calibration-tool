@@ -26,8 +26,9 @@ dependencies = [
 [project.optional-dependencies]
 # Qt lives here, never in `dependencies`: the core (detectors/models/problem/
 # solvers/report/io) must import and run with zero Qt present. matplotlib is
-# here for the same reason -- `gui/widgets.py` is its only importer, and it
-# pulls in a windowing backend nobody running headless asked for.
+# here for the same reason -- it pulls in a windowing backend nobody running
+# headless asked for. `report/figures.py` lives in the core but imports it
+# lazily, inside the drawing calls, so the core stays importable without it.
 gui = [
     "PySide6>=6.11",
     "pyqtgraph>=0.13",
@@ -66,6 +67,11 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The repository root on sys.path, so `from tests.test_jacobians import ...`
+# resolves. `python -m pytest` puts the working directory there itself, which
+# is why this was invisible locally and only failed on CI, where the bare
+# `pytest` entry point does not.
+pythonpath = ["."]
 # `slow` is opt-out, never opt-in: a test excluded by default is a test that
 # rots. The full suite still runs by default here and on the nightly job; only
 # the per-push CI job passes `-m "not slow"` to stay under a minute.

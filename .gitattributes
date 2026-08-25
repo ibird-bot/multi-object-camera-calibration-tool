@@ -1,0 +1,15 @@
+# Normalise line endings. Without this, a Windows checkout commits CRLF into
+# files a Linux CI runner then reads back with CR characters, and every commit
+# made from the other platform shows the whole file as changed. `text=auto
+# eol=lf` stores LF in the repository and hands each platform what it wants in
+# the working tree -- which is also what stops the "LF will be replaced by CRLF"
+# warnings this repo currently prints on every `git diff`.
+* text=auto eol=lf
+
+# Binary: never normalised, never diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.bmp binary
+*.tif binary
+*.tiff binary

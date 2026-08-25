@@ -3,8 +3,14 @@ __pycache__/
 *.py[cod]
 .ruff_cache/
 .pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
 *.egg-info/
 build/
 dist/
 Output/
 !Output/.gitkeep
+
+# Local working config: holds absolute paths to the operator machine.
+config.json

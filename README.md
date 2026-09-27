@@ -188,6 +188,14 @@ pytest -m "not slow"
 
 That is what CI runs on every push; the full suite runs nightly.
 
+## Versioning
+
+[Semantic versioning](https://semver.org/) from 1.0.0 onward: a breaking
+change to the config file format, the CLI, or the public Python API
+(`mlti_cal.problem`, `mlti_cal.models`, `mlti_cal.solvers`, `mlti_cal.report`)
+is a major version bump, not a silent change. See [CHANGELOG.md](CHANGELOG.md)
+for what changed in each release.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

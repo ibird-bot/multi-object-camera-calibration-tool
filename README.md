@@ -1,6 +1,7 @@
 # Multi Object Camera Calibration Tool
 
-**Version 0.1.0** | [MIT License](LICENSE) | Python 3.12
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](pyproject.toml)
 
 An open-source multi-camera calibration tool for calibrating **any number of
 cameras** against **any number of calibration objects** at the same time.
@@ -12,6 +13,11 @@ together in a single bundle adjustment, so every camera pose and every board
 pose is estimated in one consistent frame. Alongside the calibration it reports
 how much the result can be trusted: parameter covariance, per-pixel projection
 uncertainty, residual maps, coverage and cross-validated held-out error.
+
+![Projection uncertainty map: a 1-sigma error heatmap over the sensor, clean in the centre and rising toward the edges](docs/images/uncertainty-map.png)
+
+*A 1-sigma projection uncertainty map from `mlti-cal demo` -- where this
+calibration can be trusted, not just its RMS.*
 
 ### What it does
 
@@ -27,10 +33,19 @@ uncertainty, residual maps, coverage and cross-validated held-out error.
 - **Uncertainty reporting** instead of a single RMS reprojection error
 - **Desktop GUI** built with PySide6, plus a headless command line
 
-Keywords: camera calibration, multi-camera calibration, multi-object
-calibration, stereo calibration, extrinsic calibration, intrinsic calibration,
-Charuco, ArUco, checkerboard, circle grid, bundle adjustment, fisheye
-calibration, OpenCV, Python.
+## Try it in 30 seconds
+
+No data required -- generates synthetic cameras and boards, calibrates, and
+checks the result against known ground truth:
+
+```bash
+pip install -e .
+mlti-cal demo --cameras 3 --frames 20
+```
+
+This is also the fastest way to see whether an install is healthy, and it is
+the same code path the GUI runs, so a CLI result and a GUI result never
+disagree.
 
 ## Requirements
 
@@ -95,6 +110,11 @@ each also written to disk by **Export...**:
 | Residual distribution | Histogram and Q-Q against a normal; heavy tails mean outliers or unmodelled error |
 | Error vs radius | Growth toward the edge means the distortion model cannot represent the lens |
 
+![Correlation matrices: camera parameters, the least-separable pairs, and camera parameters against board poses](docs/images/correlation-matrix.png)
+
+*Which parameters the data cannot tell apart -- including camera intrinsics
+against board poses, the block a camera-only matrix would hide.*
+
 Two conventions worth knowing:
 
 - **Unobserved regions are masked, never zero.** A sensor cell with no corners
@@ -127,6 +147,17 @@ differences.
 | Matlab | `matlab` | 10 | OpenCV plus a skew term |
 | FOV | `fov` | 5 | One parameter: the lens field of view |
 | Halcon Division | `halcon_division` | 5 | One parameter, closed-form inverse |
+
+## Add your own detector
+
+Detectors are a plugin point, not a hardcoded list. Drop a `.py` file in
+`~/.mlti_cal/detectors/` (or ship one as a package with an `mlti_cal.detectors`
+entry point) and it appears in the GUI's `+ Object` menu next time the app
+starts -- nothing in the installed package changes, and a third-party detector
+reaches detection through the exact same path the built-ins use. See
+[`docs/writing-a-detector.md`](docs/writing-a-detector.md) for the interface
+and [`examples/detectors/aruco_grid.py`](examples/detectors/aruco_grid.py) for
+a complete, working example.
 
 ## Coordinate conventions
 

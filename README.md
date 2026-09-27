@@ -1,5 +1,6 @@
 # Multi Object Camera Calibration Tool
 
+[![Latest release](https://img.shields.io/github/v/release/ibird-bot/multi-object-camera-calibration-tool)](https://github.com/ibird-bot/multi-object-camera-calibration-tool/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](pyproject.toml)
 

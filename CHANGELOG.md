@@ -5,6 +5,8 @@ versioning follows [SemVer](https://semver.org/) from 1.0.0 onward.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-25
+
 ### Added
 - Validation against mrcal 2.4.1 on a public real dataset (`docs/validation.md`,
   `tools/mrcal_compare`). Same corners, same lens model, same problem: RMS

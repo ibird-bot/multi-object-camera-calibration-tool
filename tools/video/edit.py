@@ -421,10 +421,11 @@ def make_gif(video: Path, gif: Path, start: float, length: float, width: int = 9
 
 
 def main() -> int:
-    from cut_rig4cam import BRAND, build_edit, gif_window  # noqa: E402  (run as a script)
+    import importlib
 
     p = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     p.add_argument("take")
+    p.add_argument("--cut", default="cut_rig4cam", help="caption module (cut_*.py here)")
     p.add_argument("--format", choices=sorted(FORMATS), default="vertical")
     p.add_argument("-o", "--output", required=True)
     p.add_argument(
@@ -433,6 +434,8 @@ def main() -> int:
     p.add_argument("--music")
     p.add_argument("--gif", help="also write a GIF excerpt (landscape cut only)")
     a = p.parse_args()
+    cut = importlib.import_module(a.cut)
+    BRAND, build_edit, gif_window = cut.BRAND, cut.build_edit, cut.gif_window
 
     take = Take(a.take)
     edit = build_edit(take, a.format)

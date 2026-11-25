@@ -198,12 +198,14 @@ def script(d: Director, w, fmt: str) -> Script:
 
     # -- 8. ...and what it cannot tell apart ---------------------------------------
     rep.show_page("Findings")
-    card = next(
+    cards = [
         rep.findings_layout.itemAt(i).widget()
         for i in range(rep.findings_layout.count())
         if rep.findings_layout.itemAt(i).widget() is not None
-        and rep.findings_layout.itemAt(i).widget().property("finding") == "extreme_correlation"
-    )
+        and rep.findings_layout.itemAt(i).widget().property("finding")
+    ]
+    # The correlation finding when there is one; otherwise the first finding.
+    card = next((c for c in cards if c.property("finding") == "extreme_correlation"), cards[0])
     yield d.stage(card, size=size["findings"], settle=0.6)
     d.mark("shot:findings")
     yield Wait(3.2)
@@ -212,10 +214,14 @@ def script(d: Director, w, fmt: str) -> Script:
 
 
 def main() -> int:
+    global CONFIG, PREVIEW_KEY
     p = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     p.add_argument("take", nargs="?", default=str(ROOT / "Output" / "video" / "take"))
     p.add_argument("--format", choices=sorted(FORMATS), default="vertical")
+    p.add_argument("--config", default=str(CONFIG), help="calibration config to film")
+    p.add_argument("--preview", default=PREVIEW_KEY, help="camera/frame shown with its corners")
     a = p.parse_args()
+    CONFIG, PREVIEW_KEY = Path(a.config).resolve(), a.preview
     spec = FORMATS[a.format]
     take = Path(a.take).resolve()
     # A take is ~1 minute. If it hangs, say where -- every thread's stack --

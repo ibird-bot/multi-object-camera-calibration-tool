@@ -66,6 +66,10 @@ versioning follows [SemVer](https://semver.org/) from 1.0.0 onward.
 - `mlti_cal.io.render`: renders board images through the true lens models,
   with ground truth, so the whole pipeline can be tested from pixels.
 - `examples/rig_4cam`: a four-camera, three-board example built with it.
+- `examples/real_6cam`: six real RealSense infrared cameras from MC-Calib's
+  public data (prepared by its `prepare.py`; the images are not shipped). The
+  README GIF and uncertainty figure now come from this real rig, the figure via
+  `tools/make_readme_figure.py`.
 - "Generate printables" in the GUI: one A4 PDF per Charuco board, at true
   physical scale where it fits, with a ruled bar to check the print.
 

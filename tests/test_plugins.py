@@ -337,6 +337,7 @@ def test_the_gui_carries_a_plugin_object_through_the_points_editor(
     tmp_path, monkeypatch, clean_registries
 ):
     """+ Object offers the plug-in kind; Points... fills its file; the config carries it."""
+    pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
@@ -387,6 +388,7 @@ def test_plugin_warnings_from_a_worker_thread_reach_the_gui_log():
     """Detection runs off the GUI thread; its contract violations must still be shown."""
     import threading
 
+    pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication
 
     from mlti_cal.gui.log_console import LogConsole, attach_console

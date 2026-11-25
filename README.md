@@ -141,10 +141,11 @@ Bring your own detector, calibration object or lens without changing the
 package. Each is one Python file in `~/.mlti_cal/plugins/`:
 
 ```python
-def detect(image, settings):   # -> (N, 3) array of [target_id, x, y]
+def detect(image, settings):  # -> (N, 3) array of [target_id, x, y]
     ...
 
-def project(params, points):   # -> (N, 2) pixels; Jacobians optional
+
+def project(params, points):  # -> (N, 2) pixels; Jacobians optional
     ...
 ```
 

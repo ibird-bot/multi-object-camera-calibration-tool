@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from mlti_cal._threads import blas_threads
 from mlti_cal.problem.graph import Problem
 
 
@@ -132,9 +133,13 @@ def compute_covariance(
     sigma_source: str = "residual",
     weak_direction_report: int = 6,
     top_parameters: int = 4,
+    num_threads: int | None = 1,
 ) -> CovarianceResult:
     """
     Args:
+        num_threads: cap on BLAS threads for the SVD; None leaves the library
+            default. 1 by default, like the solvers, and because the default
+            pool made this SVD ~10x slower on a hybrid CPU (see _threads.py).
         pixel_noise_std: the assumed per-coordinate pixel noise floor. Used for
             the cross-check, and for the covariance itself when
             `sigma_source="assumed"`.
@@ -173,7 +178,8 @@ def compute_covariance(
     # squares the condition number too, and this problem is already
     # ill-conditioned enough that it costs real digits.
     Jd = J.toarray() if hasattr(J, "toarray") else np.asarray(J)
-    _, s, Vt = np.linalg.svd(Jd, full_matrices=False)
+    with blas_threads(num_threads):
+        _, s, Vt = np.linalg.svd(Jd, full_matrices=False)
     s_max = float(s[0]) if s.size else 0.0
     cutoff = rank_threshold * s_max
     keep = s > cutoff

@@ -18,6 +18,15 @@ from mlti_cal.report.settings import ReportSettings
 
 INFO, WARNING, CRITICAL = "info", "warning", "critical"
 
+#: |correlation| between two camera parameters above which their individual
+#: sigmas are not reported as trustworthy. Measured on examples/rig_4cam: the
+#: Double Sphere camera's fx, fy and xi correlate at 0.9994-0.99996, alpha at
+#: 0.993 with them, and all four land 30-49 of their own sigmas from the
+#: truth, while the projection they produce
+#: agrees with the true lens within 0.3 px. The linearised covariance is
+#: overconfident along such a ridge; the projection is what the data fixes.
+UNRELIABLE_SIGMA_CORRELATION = 0.999
+
 
 @dataclass
 class Warning_:
@@ -160,6 +169,26 @@ def collect_warnings(
                 )
             )
 
+        ridge = _intrinsic_ridge(covariance, cfg.correlation_threshold)
+        if ridge:
+            w.append(
+                Warning_(
+                    WARNING,
+                    "intrinsic_sigma_unreliable",
+                    f"The reported sigmas of {', '.join(ridge)} are not trustworthy: "
+                    f"these camera parameters form one near-degenerate group, with at "
+                    f"least one pair correlated beyond {UNRELIABLE_SIGMA_CORRELATION}.",
+                    "Along such a ridge the linearised covariance is overconfident. "
+                    "On the four-camera example the Double Sphere fx, fy, xi and "
+                    "alpha landed 30-49 of their own sigmas from the truth while the "
+                    "projection stayed within 0.3 px of the true lens. Do not quote "
+                    "these values or their sigmas individually; judge the camera by "
+                    "its held-out error. To get honest per-parameter spreads, re-solve "
+                    "on resampled frames (bootstrap) and measure the scatter, or fix "
+                    "one parameter of the pair.",
+                )
+            )
+
     # -- data quantity / coverage ---------------------------------------
     if num_frames and num_frames < cfg.min_frames_warn:
         w.append(
@@ -286,6 +315,39 @@ def collect_warnings(
             )
         )
     return w
+
+
+def _intrinsic_ridge(covariance, member_threshold: float) -> list[str]:
+    """
+    Camera parameters on a near-degenerate ridge, as one connected group.
+
+    A pair above UNRELIABLE_SIGMA_CORRELATION seeds the group; any parameter of
+    the same camera correlated above `member_threshold` with a member joins
+    it. The seed alone is not enough: on rig_4cam it caught fx, fy and xi
+    (|c| 0.9994-0.99996) but missed alpha, which correlates 0.993 with fx and
+    was the furthest from the truth of all four, at 49 sigma.
+    """
+
+    def camera(label: str) -> str:
+        return label.split(".")[0]
+
+    # No cap on k: top_correlations ranks board-pose pairs too, and a long
+    # capture can have hundreds of them above the threshold, which would push
+    # the camera pairs out of a capped list. It stops at the threshold anyway.
+    pairs = [
+        (a, b, abs(c))
+        for a, b, c in covariance.top_correlations(k=10**9, threshold=member_threshold)
+        if a.startswith("intr:") and b.startswith("intr:") and camera(a) == camera(b)
+    ]
+    group = {n for a, b, c in pairs if c > UNRELIABLE_SIGMA_CORRELATION for n in (a, b)}
+    grew = bool(group)
+    while grew:
+        grew = False
+        for a, b, _ in pairs:
+            if (a in group) != (b in group):
+                group.update((a, b))
+                grew = True
+    return sorted(group)
 
 
 def summarise(warnings: list[Warning_]) -> dict:

@@ -171,3 +171,71 @@ def test_draw_detections_produces_an_overlay():
     out = draw_detections(img, [found])
     assert out.ndim == 3 and out.shape[:2] == img.shape[:2]
     assert not np.array_equal(out, cv2.cvtColor(img, cv2.COLOR_GRAY2BGR))
+
+
+def test_render_draws_squares_at_the_requested_size():
+    """
+    Squares come out exactly `pixels_per_square`, with the margin around them.
+
+    Regression: the margin used to be taken out of the canvas, and this board
+    drew 185 px squares instead of 210 -- a 12% scale error on a printed target.
+    """
+    pps, margin = 210, 100
+    spec = CharucoBoardSpec("print", 12, 8, 0.021, 0.016, "DICT_4X4_100")
+    img = CharucoDetector(spec).render(pixels_per_square=pps, margin=margin)
+
+    assert img.shape == (8 * pps + 2 * margin, 12 * pps + 2 * margin)
+    # Measure the ink rather than trusting the canvas: the board must fill the
+    # canvas minus exactly the margin on every side.
+    cols = np.flatnonzero((img == 0).any(axis=0))
+    rows = np.flatnonzero((img == 0).any(axis=1))
+    assert (cols.max() + 1 - cols.min()) == 12 * pps
+    assert (rows.max() + 1 - rows.min()) == 8 * pps
+    assert cols.min() == margin and rows.min() == margin
+
+
+# ---------------------------------------------------------------------------
+# The "board geometry entered wrong" warning
+# ---------------------------------------------------------------------------
+
+
+def _tilted(img: np.ndarray, deg: float, size=(1280, 960), f=900.0, dist=2.2) -> np.ndarray:
+    """The flat board image seen tilted by `deg` about the x axis (pinhole camera)."""
+    h, w = img.shape[:2]
+    a = np.radians(deg)
+    R = cv2.Rodrigues(np.array([a, 0.0, 0.0]))[0]
+    K = np.array([[f, 0, size[0] / 2], [0, f, size[1] / 2], [0, 0, 1]])
+    to_metres = np.array([[1 / w, 0, -0.5], [0, 1 / w, -0.5 * h / w], [0, 0, 1.0]])
+    H = K @ np.column_stack([R[:, 0], R[:, 1], [0.0, 0.0, dist]]) @ to_metres
+    return cv2.GaussianBlur(cv2.warpPerspective(img, H, size, borderValue=255), (3, 3), 0.8)
+
+
+def _warnings_from(detector: CharucoDetector, image: np.ndarray) -> list[str]:
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        detector.detect(image)
+    return [str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)]
+
+
+@pytest.mark.parametrize("deg", [75, 78, 80])
+def test_steep_view_of_a_correct_board_does_not_claim_wrong_geometry(deg):
+    """
+    Regression: a correctly configured 9x7 board tilted 75-80 degrees decodes
+    5-15 markers and interpolates 0 corners. Counts alone used to trigger
+    "try squares_x=7, squares_y=9" -- wrong advice for a board that is right.
+    """
+    s = spec()
+    image = _tilted(CharucoDetector(s).render(pixels_per_square=120, margin=40), deg)
+    messages = _warnings_from(CharucoDetector(s), image)
+    assert not any("entered wrong" in m for m in messages), messages
+
+
+def test_transposed_board_geometry_is_named():
+    """The real failure still warns, and names the fix it verified."""
+    truth = spec(squares_x=9, squares_y=7)
+    image = CharucoDetector(truth).render(pixels_per_square=100, margin=40)
+    entered = spec(squares_x=7, squares_y=9)
+    messages = _warnings_from(CharucoDetector(entered), image)
+    assert any("squares_x=9, squares_y=7" in m and "entered wrong" in m for m in messages), messages

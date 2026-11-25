@@ -69,8 +69,10 @@ COMMON_OPTIONS: list[Option] = [
         default=1,
         minimum=1,
         maximum=64,
-        when="Threads for Jacobian evaluation and the linear solve. Honoured by Ceres "
-        "only; scipy ignores it. 1 by default so a run is bit-"
+        when="Threads for Jacobian evaluation and the linear solve. Ceres uses them "
+        "for both; scipy uses them as a cap on the BLAS/LAPACK pool behind its "
+        "dense factorisation, which left uncapped ran ~10x slower on a hybrid "
+        "CPU. 1 by default so a run is bit-"
         "for-bit reproducible -- raise it for large rigs and accept that "
         "floating-point summation order, and so the last digits, may change.",
     ),
@@ -275,13 +277,19 @@ LOSS_CATALOG = [
 
 #: Which COMMON options each backend actually READS, verified against the
 #: adapters rather than assumed. scipy passes ftol/gtol/xtol to
-#: `least_squares` but has no thread count; Ceres reads all four.
+#: `least_squares` and uses `num_threads` as its BLAS thread cap; Ceres reads
+#: all four.
 #:
-#: This is not tidiness. Rendering `num_threads` next to scipy shows a control
-#: that silently does nothing, which is precisely the kind of quiet lie the
-#: rest of this project exists to remove.
+#: This is not tidiness. Rendering a control next to a backend that ignores it
+#: shows a control that silently does nothing, which is precisely the kind of
+#: quiet lie the rest of this project exists to remove.
 HONOURED_COMMON: dict[str, tuple[str, ...]] = {
-    "scipy": ("function_tolerance", "gradient_tolerance", "parameter_tolerance"),
+    "scipy": (
+        "function_tolerance",
+        "gradient_tolerance",
+        "parameter_tolerance",
+        "num_threads",
+    ),
     "ceres": (
         "function_tolerance",
         "gradient_tolerance",

@@ -18,9 +18,11 @@ rather than grepping formatted output.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -36,7 +38,18 @@ from PySide6.QtWidgets import (
 
 #: Stages that write here, in pipeline order rather than alphabetical: the
 #: filter should read like the workflow.
-SOURCES = ("setup", "detect", "noise", "init", "problem", "solve", "crossval", "report")
+SOURCES = (
+    "setup",
+    "detect",
+    "plugins",
+    "noise",
+    "init",
+    "problem",
+    "solve",
+    "crossval",
+    "report",
+    "warning",
+)
 
 #: Lines kept. Bounded because a live solve emits one per iteration and an
 #: unbounded log turns a long run into a memory leak.
@@ -62,6 +75,9 @@ class LogConsole(QWidget):
     Exposes `appendPlainText` and `toPlainText` so it can stand in for the
     QPlainTextEdit this replaced without every call site being rewritten.
     """
+
+    #: (source, last non-empty line) after every write: the status line follows it.
+    appended = Signal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -119,13 +135,17 @@ class LogConsole(QWidget):
     def write(self, source: str, message: str) -> None:
         """One line per line of `message`, all tagged with `source`."""
         now = time.time()
-        for line in str(message).split("\n"):
+        lines = str(message).split("\n")
+        for line in lines:
             entry = LogEntry(now, source, line)
             self.entries.append(entry)
             if self._visible(entry):
                 self._emit(entry)
         if len(self.entries) > MAX_ENTRIES:
             del self.entries[: len(self.entries) - MAX_ENTRIES]
+        last = next((ln for ln in reversed(lines) if ln.strip()), "")
+        if last:
+            self.appended.emit(source, last)
 
     def appendPlainText(self, message: str) -> None:  # QPlainTextEdit API requires this name
         """Untagged write, for code that has not been given a stage."""
@@ -186,6 +206,10 @@ class SourceLog:
     def write(self, source: str, message: str) -> None:
         self.console.write(source, message)
 
+    def warning(self, message: str) -> None:
+        """A warning from this stage. (Called by the report view; it did not exist.)"""
+        self.console.write(self.source, f"WARNING: {message}")
+
     def toPlainText(self) -> str:  # QPlainTextEdit API requires this name
         return self.console.toPlainText()
 
@@ -201,3 +225,44 @@ def with_source(log, source: str):
     if isinstance(log, SourceLog):
         log.source = source
     return log
+
+
+class _LogBridge(QObject):
+    """Carries a record across threads: emitted anywhere, delivered on the GUI thread."""
+
+    line = Signal(str, str)
+
+
+class ConsoleLogHandler(logging.Handler):
+    """
+    WARNING and above from the `mlti_cal` loggers, into the console.
+
+    The library reports through `logging` (it is also used headless), and a
+    plug-in's contract violations are logged on the detection worker thread.
+    Writing to a widget from that thread is undefined behaviour in Qt, so the
+    record goes through a signal: the bridge lives on the GUI thread, which
+    makes the connection queued whenever the emitter is another thread.
+    """
+
+    def __init__(self, console: LogConsole):
+        super().__init__(logging.WARNING)
+        self._bridge = _LogBridge()
+        self._bridge.line.connect(console.write)
+        self.count = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        source = "plugins" if record.name.startswith("mlti_cal.plugins") else "warning"
+        try:
+            self._bridge.line.emit(source, self.format(record))
+            self.count += 1
+        except RuntimeError:  # the console is gone (window closed)
+            pass
+
+
+def attach_console(console: LogConsole) -> ConsoleLogHandler:
+    """Install a handler for `console`, removed again when the console is destroyed."""
+    handler = ConsoleLogHandler(console)
+    logger = logging.getLogger("mlti_cal")
+    logger.addHandler(handler)
+    console.destroyed.connect(lambda *_: logger.removeHandler(handler))
+    return handler

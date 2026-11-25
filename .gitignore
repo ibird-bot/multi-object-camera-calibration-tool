@@ -12,5 +12,9 @@ dist/
 Output/
 !Output/.gitkeep
 
+# Rendered by examples/rig_4cam/make_dataset.py; deterministic, ~50 MB.
+examples/rig_4cam/images/
+examples/custom_object/images/
+
 # Local working config: holds absolute paths to the operator machine.
 config.json

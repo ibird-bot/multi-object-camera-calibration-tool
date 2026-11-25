@@ -21,6 +21,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from mlti_cal.detectors.base import board_colours, draw_detections
 from mlti_cal.detectors.registry import default_detector_settings
+from mlti_cal.gui.widgets import ThumbnailStrip
 from mlti_cal.io.config import CalibrationConfig, build_system_from_config
 from mlti_cal.problem.graph import Problem
 from mlti_cal.problem.initialize import initialize_system
@@ -306,10 +307,14 @@ class DetectionWorker(QObject):
             replace(d, image_points=np.asarray(d.image_points, dtype=float) * scale)
             for d in detections
         ]
+        # The icon widget shrinks this again to THUMB px, so the radius is sized
+        # for that final icon -- sized for this image, the dots would vanish.
+        final_scale = ThumbnailStrip.THUMB / max(small.shape[:2])
+        radius = max(2, round(2 / final_scale))
         return draw_detections(
             small,
             scaled,
-            radius=2,
+            radius=radius,
             labels=False,
             colours=colours or {d.board_id: cls.CORNER_BGR for d in detections},
         )
@@ -376,12 +381,15 @@ class CrossValWorker(QObject):
         backend: str = "scipy",
         folds: int = 4,
         max_iterations: int = 200,
+        template=None,
     ):
         super().__init__()
         self.system = system
         self.backend = backend
         self.folds = folds
         self.max_iterations = max_iterations
+        # The problem the user solved: its loss and pins apply to every fold.
+        self.template = template
 
     def run(self) -> None:
         try:
@@ -394,6 +402,7 @@ class CrossValWorker(QObject):
                 k=self.folds,
                 max_iterations=self.max_iterations,
                 on_fold=self.fold_done.emit,
+                template=self.template,
             )
             self.finished.emit(result)
         except Exception as exc:  # surfaced in the UI, never swallowed

@@ -21,6 +21,11 @@ dependencies = [
     # 5.x line carries the OpenCV-5 aruco API the detectors target. Verified: plain
     # pin resolves to a stable wheel (5.0.0.93), no --pre needed.
     "opencv-contrib-python==5.*",
+    # Core despite the rule above: pure Python, so it cannot break an install,
+    # and capping OpenBLAS threads made the dense solve and covariance ~10x
+    # faster on a hybrid CPU (mlti_cal/_threads.py). The import is guarded, so
+    # a missing copy only costs speed.
+    "threadpoolctl>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -118,7 +123,9 @@ check_untyped_defs = true
 # a core-only install turns every Qt import into an unresolved-import error in
 # `gui/log_console.py`, which is clean and therefore not silenced by the debt
 # list below -- a confusing failure about the wrong thing.
-module = ["cv2.*", "scipy.*", "pyceres.*", "pyqtgraph.*", "matplotlib.*", "PySide6.*"]
+module = [
+    "cv2.*", "scipy.*", "pyceres.*", "pyqtgraph.*", "matplotlib.*", "PySide6.*", "threadpoolctl",
+]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

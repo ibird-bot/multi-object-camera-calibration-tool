@@ -84,9 +84,22 @@ def board_colours(board_ids: Iterable[str]) -> dict[str, tuple[int, int, int]]:
     }
 
 
+def _glyph(kind_id: str) -> str:
+    """The shape a kind declared for itself; the built-in table only as a fallback."""
+    from mlti_cal.detectors.registry import DETECTOR_KINDS  # registry is a leaf; no cycle
+
+    kind = DETECTOR_KINDS.get(kind_id)
+    return kind.glyph if kind is not None else KIND_MARKER.get(kind_id, "circle")
+
+
 def _draw_glyph(canvas, x: int, y: int, radius: int, colour, marker: str) -> None:
     if marker == "square":
         cv2.rectangle(canvas, (x - radius, y - radius), (x + radius, y + radius), colour, -1)
+    elif marker == "triangle":
+        pts = np.array(
+            [[x, y - radius], [x + radius, y + radius], [x - radius, y + radius]], dtype=np.int32
+        )
+        cv2.fillConvexPoly(canvas, pts, colour)
     elif marker == "diamond":
         pts = np.array(
             [[x, y - radius], [x + radius, y], [x, y + radius], [x - radius, y]], dtype=np.int32
@@ -124,7 +137,7 @@ def draw_detections(
         colours = board_colours(d.board_id for d in detections)
     for det in detections:
         c = colour if colour is not None else colours.get(det.board_id, BOARD_PALETTE[0])
-        marker = KIND_MARKER.get(det.kind, "circle")
+        marker = _glyph(det.kind)
         for (x, y), pid in zip(det.image_points, det.point_ids, strict=True):
             _draw_glyph(canvas, int(round(x)), int(round(y)), radius, c, marker)
             if not labels:

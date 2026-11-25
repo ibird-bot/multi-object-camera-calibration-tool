@@ -34,6 +34,11 @@ class Board:
     kind: str = "charuco"
     meta: dict = field(default_factory=dict)
 
+    @property
+    def is_flat(self) -> bool:
+        """Every point on z = 0 -- what OpenCV's planar calibration assumes."""
+        return bool(np.allclose(self.object_points[:, 2], 0.0, atol=1e-12))
+
     def __post_init__(self) -> None:
         self.object_points = np.asarray(self.object_points, dtype=float).reshape(-1, 3)
 

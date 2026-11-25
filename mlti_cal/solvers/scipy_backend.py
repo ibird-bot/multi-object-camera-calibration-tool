@@ -39,6 +39,7 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.optimize import least_squares
 
+from mlti_cal._threads import blas_threads
 from mlti_cal.models.manifolds import so3_left_jacobian
 from mlti_cal.problem.graph import POSE, Problem
 from mlti_cal.solvers.base import (
@@ -166,7 +167,12 @@ class ScipyBackend(SolverBackend):
             kwargs["loss"] = loss_name
             kwargs["f_scale"] = opts.get("f_scale", 1.0)
 
-        result = least_squares(**kwargs)
+        # `num_threads` caps the BLAS pool for the dense factorisation trf runs
+        # every iteration. Left uncapped, OpenBLAS oversubscribes hybrid CPUs:
+        # measured 349 s for the rig_4cam solve versus a few tens of seconds
+        # capped. See mlti_cal/_threads.py.
+        with blas_threads(opts.num_threads):
+            result = least_squares(**kwargs)
 
         # Leave the problem AT the solution, not wherever the last probe was.
         problem.set_from_base(base_state, result.x)

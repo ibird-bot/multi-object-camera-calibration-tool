@@ -27,6 +27,7 @@ from mlti_cal.io.config import (
     build_system_from_config,
     export_json,
     export_opencv_yaml,
+    plugin_stat_lines,
 )
 from mlti_cal.options import render_options
 from mlti_cal.problem.initialize import initialize_system
@@ -161,6 +162,8 @@ def cmd_calibrate(args) -> int:
     system, stats = build_system_from_config(config)
     for cid, s in stats["per_camera"].items():
         print(f"  {cid}: {s['detections']} detections over {s['images']} images")
+    for line in plugin_stat_lines(stats):
+        print(f"  {line}")
     initialize_system(system)
     args.pixel_noise = config.pixel_noise_std
     return _solve_and_report(system, args)
@@ -211,8 +214,34 @@ def cmd_compare(args) -> int:
     return 0
 
 
+def cmd_plugins_list(args) -> int:
+    import mlti_cal.detectors  # noqa: F401  (runs plug-in discovery)
+    from mlti_cal.plugins.check import list_plugins
+
+    print("\n".join(list_plugins()))
+    return 0
+
+
+def cmd_plugins_check(args) -> int:
+    import mlti_cal.detectors  # noqa: F401  (the registry the checks build against)
+    from mlti_cal.plugins.check import check_file
+
+    passed, lines = check_file(args.file, image=args.image, points=args.points)
+    print("\n".join(lines))
+    print("PASSED" if passed else "FAILED")
+    return 0 if passed else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mlti-cal", description=__doc__.split("\n")[1])
+    p.add_argument(
+        "--plugins",
+        action="append",
+        default=[],
+        metavar="FOLDER",
+        help="also load the plug-ins in this folder (repeatable); "
+        "~/.mlti_cal/plugins is always searched",
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     def common(sp):
@@ -264,6 +293,16 @@ def build_parser() -> argparse.ArgumentParser:
     common(c)
     c.set_defaults(func=cmd_calibrate)
 
+    pl = sub.add_parser("plugins", help="list loaded plug-ins, or check one file")
+    plsub = pl.add_subparsers(dest="plugins_command", required=True)
+    pll = plsub.add_parser("list", help="plug-in folders, what loaded, what failed and why")
+    pll.set_defaults(func=cmd_plugins_list)
+    plc = plsub.add_parser("check", help="run the contract checks on one plug-in file")
+    plc.add_argument("file")
+    plc.add_argument("--image", help="also run detect() on this picture")
+    plc.add_argument("--points", help="and match what it finds against this points file")
+    plc.set_defaults(func=cmd_plugins_check)
+
     m = sub.add_parser("compare", help="every backend on one problem")
     m.add_argument("--cameras", type=int, default=2)
     m.add_argument("--frames", type=int, default=12)
@@ -286,6 +325,17 @@ def main(argv=None) -> int:
         format="%(message)s",
         stream=sys.stderr,
     )
+    if args.plugins:
+        from mlti_cal.detectors.registry import PLUGIN_ERRORS, load_plugin_dir
+
+        for folder in args.plugins:
+            if not Path(folder).is_dir():
+                print(f"ERROR: --plugins {folder}: no such folder", file=sys.stderr)
+                return 2
+            load_plugin_dir(folder)
+        for where, detail in PLUGIN_ERRORS.items():
+            last = detail.strip().splitlines()[-1]
+            print(f"WARNING: plug-in {where} not loaded: {last}", file=sys.stderr)
     return args.func(args)
 
 

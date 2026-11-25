@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from mlti_cal.detectors import DETECTOR_KINDS, PLUGIN_ERRORS
 from mlti_cal.detectors.base import Detection, board_colours, draw_detections
 from mlti_cal.detectors.registry import get_kind, implemented_kinds
+from mlti_cal.gui.components import plain_table, primary, set_role
 from mlti_cal.gui.session import DetectionWorker, Session, refuse_if_busy, run_in_thread
 from mlti_cal.gui.widgets import ImageView, ThumbnailStrip
 from mlti_cal.io.config import CalibrationConfig, CameraConfig, board_kind, find_images
@@ -110,12 +111,16 @@ class DetectionView(QWidget):
         lv = QVBoxLayout(left)
 
         # ---- cameras ---------------------------------------------------
-        cam_box = QGroupBox("Cameras  (add with +, minimum 1)")
+        cam_box = QGroupBox("Cameras")
         cl = QVBoxLayout(cam_box)
-        self.camera_table = QTableWidget(0, 3)
+        self.camera_table = plain_table(QTableWidget(0, 3))
         self.camera_table.setHorizontalHeaderLabels(["id", "model", "image folder"])
         self.camera_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.camera_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.camera_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # Room for four rows; more scroll. The space below goes to the
+        # detections list instead of to empty table.
+        self.camera_table.setMaximumHeight(176)
         cl.addWidget(self.camera_table)
         row = QHBoxLayout()
         add_cam = QPushButton("+ Camera")
@@ -132,18 +137,33 @@ class DetectionView(QWidget):
         board_box = QGroupBox("Calibration objects")
         bl = QVBoxLayout(board_box)
         headers = list(self.FIXED_COLUMNS) + self.board_column_labels()
-        self.board_table = QTableWidget(0, len(headers))
+        self.board_table = plain_table(QTableWidget(0, len(headers)))
         # Headers come from the registry: `id`, `kind`, then one column per
         # distinct board field across every installed detector. Installing a
         # plugin that declares a new field adds a column here on the next run.
         self.board_table.setHorizontalHeaderLabels(headers)
         self.board_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # The kind column holds a combo whose labels ("Charuco board") were cut off.
+        self.board_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.board_table.setMaximumHeight(176)
         bl.addWidget(self.board_table)
         brow = QHBoxLayout()
         add_b = self._build_add_object_button()
         rm_b = QPushButton("- Remove")
         rm_b.clicked.connect(lambda: self._remove_row(self.board_table))
-        for b in (add_b, rm_b):
+        printables_b = QPushButton("Generate printables...")
+        printables_b.setToolTip(
+            "Write one A4 PDF per Charuco board, at true physical scale where it fits."
+        )
+        printables_b.clicked.connect(self._generate_printables)
+        self.points_btn = QPushButton("Points...")
+        self.points_btn.setObjectName("points_button")
+        self.points_btn.setToolTip(
+            "Edit, paste or import the id, x, y, z list of the selected object -- for "
+            "objects detected by a plug-in."
+        )
+        self.points_btn.clicked.connect(self._edit_points)
+        for b in (add_b, rm_b, self.points_btn, printables_b):
             brow.addWidget(b)
         brow.addStretch()
         bl.addLayout(brow)
@@ -197,59 +217,81 @@ class DetectionView(QWidget):
         noise_row.addWidget(self.measure_noise_btn)
         rl.addRow("assumed pixel noise", noise_row)
 
+        # Loading and saving a config are in the File menu: beside the one
+        # action this page is for, they read as two more equal choices.
         btns = QHBoxLayout()
-        self.detect_btn = QPushButton("Run detection")
+        self.detect_btn = primary(QPushButton("Run detection"))
         self.detect_btn.clicked.connect(self._run_detection)
-        load_btn = QPushButton("Load config...")
-        load_btn.clicked.connect(self._load_config)
-        save_btn = QPushButton("Save config...")
-        save_btn.clicked.connect(self._save_config)
-        for b in (self.detect_btn, load_btn, save_btn):
-            btns.addWidget(b)
+        self.summary = set_role(QLabel("no data loaded"), "muted")
+        self.summary.setWordWrap(True)
+        btns.addWidget(self.detect_btn)
+        btns.addWidget(self.summary, 1)
         rl.addRow(btns)
         lv.addWidget(run_box)
 
-        self.summary = QLabel("no data loaded")
-        self.summary.setWordWrap(True)
-        lv.addWidget(self.summary)
-        lv.addStretch()
+        # ---- what detection found, one row per image --------------------
+        # Under the form that produced it, where the page used to be empty;
+        # the right side is left to the pictures.
+        table_box = QGroupBox("Detections")
+        tbv = QVBoxLayout(table_box)
+        self.image_table = plain_table(QTableWidget(0, 4))
+        self.image_table.setHorizontalHeaderLabels(["use", "frame", "camera", "corners"])
+        self.image_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.image_table.setColumnWidth(0, 48)
+        self.image_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.image_table.itemSelectionChanged.connect(self._preview_selected)
+        self.image_table.setToolTip("Untick an image to leave it out, then apply.")
+        tbv.addWidget(self.image_table)
+        cull = QHBoxLayout()
+        apply_cull = QPushButton("Drop unticked")
+        apply_cull.setToolTip("Drop unchecked observations from the problem.")
+        apply_cull.clicked.connect(self._apply_culling)
+        cull.addWidget(apply_cull)
+        cull.addStretch()
+        tbv.addLayout(cull)
+        lv.addWidget(table_box, 1)
         splitter.addWidget(left)
 
         # ---- right: thumbnails + per-image list + preview ---------------
-        right = QWidget()
-        rv = QVBoxLayout(right)
+        # A splitter, so the user decides which of the three panes gets the room.
+        right = QSplitter(Qt.Vertical)
 
+        thumb_box = QWidget()
+        tv = QVBoxLayout(thumb_box)
+        tv.setContentsMargins(0, 0, 0, 0)
         # The strip sits above the table so a bad capture is visible as a
         # picture, not as a row of numbers.
-        rv.addWidget(QLabel("Images"))
+        tv.addWidget(set_role(QLabel("Images"), "caption"))
         self.thumbnails = ThumbnailStrip()
         self.thumbnails.setToolTip(
             "Every image in the configured folders. The one being processed is "
             "highlighted; afterwards each thumbnail shows its corners in red."
         )
         self.thumbnails.picked.connect(self._preview_key)
-        rv.addWidget(self.thumbnails, 3)
+        tv.addWidget(self.thumbnails)
+        right.addWidget(thumb_box)
 
-        rv.addWidget(QLabel("Detections per image  (uncheck to cull)"))
-        self.image_table = QTableWidget(0, 4)
-        self.image_table.setHorizontalHeaderLabels(["use", "frame", "camera", "corners"])
-        self.image_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.image_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.image_table.itemSelectionChanged.connect(self._preview_selected)
-        rv.addWidget(self.image_table, 1)
-        cull = QHBoxLayout()
-        apply_cull = QPushButton("Apply culling")
-        apply_cull.setToolTip("Drop unchecked observations from the problem.")
-        apply_cull.clicked.connect(self._apply_culling)
+        preview_box = QWidget()
+        pv = QVBoxLayout(preview_box)
+        pv.setContentsMargins(0, 0, 0, 0)
+        fit = QHBoxLayout()
         self.fit_check = QCheckBox("fit image to window")
         self.fit_check.setChecked(True)
         self.fit_check.toggled.connect(lambda v: self.image_view.set_fit(v))
-        cull.addWidget(apply_cull)
-        cull.addWidget(self.fit_check)
-        cull.addStretch()
-        rv.addLayout(cull)
+        fit.addWidget(self.fit_check)
+        fit.addStretch()
+        pv.addLayout(fit)
         self.image_view = ImageView()
-        rv.addWidget(self.image_view, 2)
+        self.image_view.setToolTip("Scroll to zoom; drag to pan once zoomed in.")
+        self.image_view.fit_changed.connect(self.fit_check.setChecked)
+        pv.addWidget(self.image_view)
+        right.addWidget(preview_box)
+
+        # Stretch factors only divide EXTRA space on resize; the opening split
+        # needs `setSizes`, or sizeHint squeezes the preview to a sliver.
+        right.setStretchFactor(0, 1)
+        right.setStretchFactor(1, 3)
+        right.setSizes([300, 600])
         splitter.addWidget(right)
         splitter.setSizes([560, 640])
 
@@ -290,8 +332,8 @@ class DetectionView(QWidget):
         fl.setContentsMargins(0, 0, 0, 0)
         edit = QLineEdit()
         edit.setPlaceholderText("folder of images for this camera")
-        browse = QPushButton("...")
-        browse.setMaximumWidth(30)
+        browse = QPushButton("Browse")
+        browse.setToolTip("Choose the folder")
         browse.clicked.connect(lambda _, e=edit: self._browse_into(e))
         fl.addWidget(edit)
         fl.addWidget(browse)
@@ -542,6 +584,12 @@ class DetectionView(QWidget):
             suffix = "" if kind.origin == "built-in" else f"  [{kind.origin}]"
             kind_combo.addItem(kind.label + suffix, kind.id)
         kind_combo.setCurrentIndex(max(0, kind_combo.findData(kind_id)))
+        # Wide enough for its longest label plus the arrow. The column is sized
+        # from this widget's size hint, and the styled arrow area is not in it,
+        # so "Charuco board" was cut short.
+        longest = max(len(kind_combo.itemText(i)) for i in range(kind_combo.count()))
+        kind_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        kind_combo.setMinimumContentsLength(longest + 5)
         kind_combo.setToolTip(
             "Which detector looks for this object. Coded targets are found first "
             "and painted out before the uncoded ones search."
@@ -569,6 +617,30 @@ class DetectionView(QWidget):
                 source = mine or opts[0]
                 t.setItem(r, col, QTableWidgetItem(str(source.default)))
         self._sync_board_row(r)
+
+    def _edit_points(self) -> None:
+        """Open the points editor for the selected object; store the saved file's path."""
+        rows = sorted({i.row() for i in self.board_table.selectedIndexes()})
+        if not rows:
+            QMessageBox.information(self, "No object selected", "Select an object row first.")
+            return
+        r = rows[0]
+        kind = get_kind(self._board_kind(r))
+        field = next((o for o in kind.board_fields if o.name == "points_file"), None)
+        if field is None:
+            QMessageBox.information(
+                self,
+                "Not a point-list object",
+                f"A {kind.label} is described by its own fields, not by a list of points. "
+                f"Point lists are for objects detected by a plug-in.",
+            )
+            return
+        from mlti_cal.gui.plugin_dialogs import PointsDialog
+
+        object_id = self.board_table.item(r, 0).text().strip()
+        dialog = PointsDialog(object_id, str(self._read_cell(r, field)), self)
+        if dialog.exec() and dialog.saved_path:
+            self._write_cell(r, field, dialog.saved_path)
 
     def _read_cell(self, row: int, opt: Option):
         """One cell as the type its field declares."""
@@ -700,6 +772,33 @@ class DetectionView(QWidget):
         self.noise_spin.setValue(sigma)
         self._announce(f"measured pixel noise: {sigma:.4f} px per coordinate")
 
+    def _generate_printables(self) -> None:
+        """One A4 PDF per Charuco board; `report/printables.py` says why Charuco only."""
+        try:
+            specs = self._collect_config().specs_by_kind().get("charuco", [])
+        except Exception as exc:
+            QMessageBox.critical(self, "Board definition invalid", f"{type(exc).__name__}:\n{exc}")
+            return
+        if not specs:
+            QMessageBox.information(
+                self,
+                "No Charuco board defined",
+                "Printables are generated for Charuco boards only, and none are configured.",
+            )
+            return
+        d = QFileDialog.getExistingDirectory(self, "Save printables to folder")
+        if not d:
+            return
+        try:
+            from mlti_cal.report.printables import generate_charuco_printables
+
+            written = generate_charuco_printables(specs, d)
+        except Exception as exc:
+            QMessageBox.critical(self, "Printables failed", f"{type(exc).__name__}:\n{exc}")
+            return
+        self._announce(f"generated {len(written)} A4 printable(s) in {d}")
+        QMessageBox.information(self, "Printables generated", "\n".join(str(p) for p in written))
+
     def open_detector_settings(self) -> None:
         """
         Open the per-detector settings window. Public: the menu bar calls it too.
@@ -818,6 +917,11 @@ class DetectionView(QWidget):
         self._detection_stale = False
         self.session.detection_stale = False
         self.detect_btn.setText("Run detection")
+        from mlti_cal.io.config import plugin_stat_lines
+
+        plugin_lines = plugin_stat_lines(stats)
+        for line in plugin_lines:
+            self._announce(line)
 
         if not system.observations:
             # A run that searched every image and found nothing is a FAILURE to
@@ -832,9 +936,13 @@ class DetectionView(QWidget):
                 self,
                 "No detections",
                 f"Searched {searched} image(s) and found no corners.\n\n"
-                "The board description almost certainly does not match the "
-                "printed board. Check the squares x / squares y counts and the "
-                "dictionary against the board actually in the pictures.",
+                + (
+                    "\n".join(plugin_lines)
+                    if plugin_lines
+                    else "The board description almost certainly does not match the "
+                    "printed board. Check the squares x / squares y counts and the "
+                    "dictionary against the board actually in the pictures."
+                ),
             )
             self._announce(f"detection found nothing in {searched} image(s)")
             return

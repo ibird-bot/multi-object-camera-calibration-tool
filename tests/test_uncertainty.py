@@ -11,7 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from mlti_cal.io.synthetic import generate_dataset
+from mlti_cal.io.synthetic import generate_dataset, seed_ground_truth_poses
+from mlti_cal.models.camera import available_models, get_model
 from mlti_cal.problem.initialize import initialize_system
 from mlti_cal.problem.reprojection import (
     build_problem,
@@ -270,6 +271,115 @@ def test_projection_uncertainty_map_is_finite_and_positive():
     assert m.worst() >= m.at_centre()
 
 
+def _monte_carlo_projection_sigma(system, cam_id, pixels, range_m, noise, trials, seed=1):
+    """
+    Ground truth for the map: re-solve under fresh pixel noise and measure how
+    far a point FIXED TO THE BOARDS really moves in the image.
+
+    The solved state is taken as truth; its own predicted pixels are re-noised,
+    each observation through ITS OWN camera. Each query point is carried into
+    every board frame with the baseline poses, brought back with the re-solved
+    ones, averaged in the rig frame, and projected with the re-solved
+    extrinsic and intrinsics of `cam_id`.
+    Convention: X_cam = T_cam_rig * T_rig_board * X_board.
+    """
+    import copy
+
+    from mlti_cal.models.manifolds import pose_to_matrix
+    from mlti_cal.report.uncertainty import unproject
+
+    def rig_from_board(s):
+        return {k: pose_to_matrix(p) for k, p in s.board_poses.items()}
+
+    def homogeneous(X):
+        return np.column_stack([X, np.ones(len(X))])
+
+    cam = system.cameras[cam_id]
+    rays, _ = unproject(cam.model_name, cam.params, pixels)
+    p_rig = homogeneous(rays * range_m) @ np.linalg.inv(pose_to_matrix(cam.extrinsic)).T
+    B0 = rig_from_board(system)
+    p_board = {k: p_rig @ np.linalg.inv(T).T for k, T in B0.items()}
+    clean = []
+    for o in system.observations:
+        c = system.cameras[o.camera]
+        T = pose_to_matrix(c.extrinsic) @ B0[(o.frame, o.board)]
+        X = system.boards[o.board].object_points[o.point_ids]
+        clean.append(c.model.project(c.params, (homogeneous(X) @ T.T)[:, :3]))
+
+    rng = np.random.default_rng(seed)
+    backend = get_backend("scipy")
+    samples = []
+    for _ in range(trials):
+        trial = copy.deepcopy(system)
+        for o, c in zip(trial.observations, clean, strict=True):
+            o.image_points = c + rng.normal(scale=noise, size=c.shape)
+        problem = build_problem(trial)
+        backend.solve(problem, SolveOptions(max_iterations=100))
+        write_back(trial, problem)
+        Bk = rig_from_board(trial)
+        moved_rig = np.mean([p_board[k] @ Bk[k].T for k in Bk], axis=0)
+        tc = trial.cameras[cam_id]
+        moved = (moved_rig @ pose_to_matrix(tc.extrinsic).T)[:, :3]
+        samples.append(cam.model.project(tc.params, moved))
+    samples = np.array(samples)  # (trials, N, 2)
+    return np.array(
+        [np.sqrt(np.linalg.eigvalsh(np.cov(samples[:, i].T)).max()) for i in range(len(pixels))]
+    )
+
+
+@pytest.mark.slow  # 80 re-solves per case, minutes on the scipy backend
+@pytest.mark.parametrize(
+    ("num_cameras", "cam_id"),
+    [(1, "cam0"), (2, "cam1")],
+    ids=["reference-camera", "non-reference-camera"],
+)
+def test_projection_uncertainty_matches_monte_carlo_resolves(num_cameras, cam_id):
+    """
+    THE test of the headline number: the map must predict what re-solving does.
+
+    Regression for the original defect. The first implementation held the query
+    point fixed in CAMERA coordinates, which ignores that the board poses move
+    to compensate an intrinsics error. It reported sigma(cx) at the image
+    centre: 10.35 px claimed against 0.84 px measured at 0.3 px noise.
+
+    Run at 0.03 px noise on purpose. The map is a linearisation, and this
+    dataset is weakly constrained enough that at 0.3 px the off-centre spread
+    is 2x the linear prediction (measured: 1.84 px predicted, 4.12 px actual at
+    x=324). Low noise isolates "is the formula right" from "is the problem
+    linear", which test_linear_uncertainty_model_degrades_... covers.
+
+    The non-reference case is the one that exercises the extrinsic and the
+    extrinsic-board cross terms; on the reference camera R_E is the identity
+    and a transposed rotation there would pass unseen.
+    """
+    noise = 0.03
+    system, _, problem, _ = solved(num_cameras=num_cameras, num_frames=25, noise=noise, seed=40)
+    cov = compute_covariance(problem, pixel_noise_std=noise)
+    m = projection_uncertainty(problem, system, cov, cam_id, range_m=1.0)
+    old = projection_uncertainty(problem, system, cov, cam_id, range_m=1.0, reference="camera")
+
+    h, w = m.sigma_max.shape
+    cells = [(h // 2, w // 2), (h // 2, 3 * w // 8), (h // 2, w // 4)]
+    pixels = np.array([[m.grid_u[c], m.grid_v[c]] for c in cells], dtype=float)
+    measured = _monte_carlo_projection_sigma(system, cam_id, pixels, 1.0, noise, trials=80)
+
+    for c, mc in zip(cells, measured, strict=True):
+        # 80 trials pin a standard deviation to ~8%; 30% leaves room for that.
+        assert m.sigma_max[c] == pytest.approx(mc, rel=0.3), (
+            f"cell {c}: map says {m.sigma_max[c]:.4f} px, re-solving gives {mc:.4f} px"
+        )
+    # The camera-frame quantity is a different thing, and far larger here.
+    assert old.sigma_max[cells[0]] > 5.0 * measured[0]
+    assert m.reference == "boards" and old.reference == "camera"
+
+
+def test_projection_uncertainty_rejects_an_unknown_reference():
+    system, _, problem, _ = solved()
+    cov = compute_covariance(problem)
+    with pytest.raises(ValueError, match="reference"):
+        projection_uncertainty(problem, system, cov, "cam0", range_m=1.5, reference="world")
+
+
 def test_uncertainty_grows_away_from_the_covered_centre():
     """Corners have less data, so they must not report LOWER uncertainty."""
     system, _, problem, _ = solved(num_frames=16)
@@ -316,6 +426,49 @@ def test_unproject_flags_uninvertible_pixels():
     _, valid = unproject("pinhole_radtan", params, pixels, model=model)
     assert valid[0], "the optical centre must always invert"
     assert not valid.all(), "extreme corners must be flagged with this distortion"
+
+
+@pytest.mark.parametrize("model_name", sorted(available_models()))
+def test_unproject_inverts_every_camera_model(model_name):
+    """
+    Every model inverts by its OWN law.
+
+    Regression: non-OpenCV models were handed to `cv2.undistortPoints` as if
+    their coefficients were OpenCV's -- five models raised, and thin prism was
+    silently undistorted by the wrong law.
+
+    Two tolerances, both measured: the model's own Newton inverse is exact, but
+    OpenCV's undistortPoints stops after a few iterations and is off by up to
+    ~0.8 px near the corners of a pinhole lens -- inside the 1 px validity test.
+    The valid share is not 100% because the wide models (EUCM at this focal
+    length) see rays past 90 degrees, which the z = 1 inverse cannot express.
+    """
+    from mlti_cal.report.uncertainty import unproject
+
+    _, gt = generate_dataset(num_cameras=1, num_frames=2, model_name=model_name)
+    params, model = gt.camera_params["cam0"], get_model(model_name)
+    us, vs = np.meshgrid(np.arange(16, 1280, 64), np.arange(16, 720, 64))
+    pixels = np.column_stack([us.ravel(), vs.ravel()]).astype(float)
+
+    rays, valid = unproject(model_name, params, pixels, model=model)
+
+    assert valid.mean() > 0.8, f"only {valid.mean():.0%} of a ground-truth lens inverted"
+    back = model.project(params, rays[valid])
+    tolerance = 1.0 if model.opencv_compatible else 1e-6
+    assert np.abs(back - pixels[valid]).max() < tolerance
+
+
+@pytest.mark.parametrize(
+    "model_name", ["double_sphere", "eucm", "fov", "halcon_division", "matlab"]
+)
+def test_uncertainty_map_builds_for_non_opencv_models(model_name):
+    system, gt = generate_dataset(num_cameras=1, num_frames=8, model_name=model_name)
+    seed_ground_truth_poses(system, gt)
+    problem = build_problem(system)
+    cov = compute_covariance(problem)
+    m = projection_uncertainty(problem, system, cov, "cam0", range_m=1.5, grid_step=64)
+    assert m.valid.mean() > 0.5
+    assert np.all(np.isfinite(m.sigma_max[m.valid]))
 
 
 def test_uncertainty_requires_an_explicit_range():
@@ -392,3 +545,81 @@ def test_crossval_reports_optimism():
     assert np.isfinite(cv.mean_train_rms) and np.isfinite(cv.mean_test_rms)
     # Held-out error is essentially never better than training error.
     assert cv.mean_test_rms > cv.mean_train_rms * 0.8
+
+
+def test_crossval_folds_keep_the_solved_loss_and_pins(monkeypatch):
+    """
+    Regression: every fold was rebuilt with `build_problem(subset)` and so
+    silently dropped the robust loss and every pinned parameter. The held-out
+    error then described a more flexible model than the one the user solved.
+    """
+    import mlti_cal.report.crossval as cv_mod
+    from mlti_cal.problem.loss import make_loss
+
+    system, _, _, _ = solved(num_cameras=1, num_frames=12, noise=0.3)
+    loss = make_loss("huber", 2.0)
+    template = build_problem(system, loss=loss, fixed_intrinsic_components={"cam0": [8]})
+    k3 = float(system.cameras["cam0"].params[8])
+
+    built = []
+
+    def recording_build_problem(*args, **kwargs):
+        p = build_problem(*args, **kwargs)
+        built.append(p)
+        return p
+
+    monkeypatch.setattr(cv_mod, "build_problem", recording_build_problem)
+    cv_mod.cross_validate(system, k=3, max_iterations=50, template=template)
+
+    assert len(built) == 6  # one training and one test problem per fold
+    for p in built:
+        assert all(r.loss is loss for r in p.residuals), "a fold dropped the robust loss"
+    for p in built[0::2]:  # the training problems
+        blk = p.blocks[intr_key("cam0")]
+        assert not blk.free_mask[8], "a fold freed the pinned k3"
+        assert blk.value[8] == k3, "a fold moved the pinned k3"
+
+
+def _stub_covariance(pairs):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        rank_deficient=False,
+        condition_number=1.0,
+        noise_disagreement_flagged=False,
+        top_correlations=lambda k=10, threshold=0.9: [p for p in pairs if abs(p[2]) >= threshold][
+            :k
+        ],
+    )
+
+
+def test_intrinsics_on_a_correlation_ridge_get_their_sigmas_flagged():
+    """
+    Double Sphere fx/xi/alpha at +0.999 landed 30-49 sigma from truth on the
+    rig example. Their sigmas must be called untrustworthy, not just
+    "correlated" -- and pose-only ridges must not trigger it.
+    """
+    from mlti_cal.report.warnings import collect_warnings
+
+    # The rig_4cam shape: fx/fy/xi above 0.999, alpha at 0.993 with fx only.
+    ridge = [
+        ("intr:cam2.0", "intr:cam2.1", 0.99996),
+        ("intr:cam2.0", "intr:cam2.4", 0.99942),
+        ("intr:cam2.0", "intr:cam2.5", 0.99340),
+        ("intr:cam0.0", "intr:cam0.1", 0.99500),  # another camera, no seed
+    ]
+    codes = {w.code: w for w in collect_warnings(covariance=_stub_covariance(ridge))}
+    assert "intrinsic_sigma_unreliable" in codes
+    message = codes["intrinsic_sigma_unreliable"].message
+    for name in ("intr:cam2.0", "intr:cam2.1", "intr:cam2.4", "intr:cam2.5"):
+        assert name in message, f"{name} is on the ridge but not named"
+    assert "intr:cam0" not in message, "a camera without a seed pair was pulled in"
+
+    mild = [("intr:cam0.0", "intr:cam0.1", 0.995)]
+    assert "intrinsic_sigma_unreliable" not in {
+        w.code for w in collect_warnings(covariance=_stub_covariance(mild))
+    }
+    poses = [("pose:f1|b.0", "pose:f1|b.4", 0.9999)]
+    assert "intrinsic_sigma_unreliable" not in {
+        w.code for w in collect_warnings(covariance=_stub_covariance(poses))
+    }

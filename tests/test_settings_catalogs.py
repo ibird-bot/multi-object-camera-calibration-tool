@@ -265,7 +265,8 @@ def test_describe_lists_only_the_options_a_backend_reads():
                 assert opt.name not in names, f"{backend} lists {opt.name} but ignores it"
 
     assert "num_threads" in describe("ceres")
-    assert "num_threads" not in {o.name for o in options_for("scipy")}
+    # scipy honours it too, as the cap on its BLAS pool (mlti_cal/_threads.py).
+    assert "num_threads" in describe("scipy")
 
 
 def test_honoured_common_options_match_what_the_adapters_read():

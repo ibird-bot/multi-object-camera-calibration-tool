@@ -204,6 +204,49 @@ def test_multicamera_recovers_extrinsics():
         assert r_err < 0.05, f"{cid}: rotation error {r_err:.4f} deg"
 
 
+def _drop_views(system, keep) -> None:
+    """Keep only the observations `keep(camera, frame_index)` accepts."""
+    frames = sorted(system.frames)
+    system.observations = [o for o in system.observations if keep(o.camera, frames.index(o.frame))]
+
+
+def test_a_camera_that_never_sees_the_reference_view_is_chained():
+    """
+    cam2 shares boards with cam1 only, never with the reference cam0. Its
+    extrinsic is still observable -- through cam1 -- and must be recovered.
+    """
+    system, gt = generate_dataset(num_cameras=3, num_frames=20, pixel_noise_std=0.0, seed=9)
+    # Frames 0-9: cam0 + cam1.  Frames 10-19: cam1 + cam2.
+    _drop_views(system, lambda cam, f: not (cam == "cam2" and f < 10 or cam == "cam0" and f >= 10))
+
+    report = initialize_system(system)
+    assert report["extrinsic_support"]["cam2"] > 0
+    t_err, r_err = relative_extrinsic_error(
+        system.cameras["cam2"].extrinsic, gt.camera_extrinsics["cam2"]
+    )
+    # Bootstrap accuracy only: OpenCV intrinsics, then PnP, then a two-hop chain.
+    assert t_err < 0.02 and r_err < 1.0, f"bootstrap off by {t_err * 1000:.1f} mm, {r_err:.2f} deg"
+
+    problem = build_problem(system)
+    result = get_backend("scipy").solve(problem, SolveOptions(max_iterations=300))
+    write_back(system, problem)
+    assert result.final_rms_px < 5e-3, result.summary()
+    t_err, r_err = relative_extrinsic_error(
+        system.cameras["cam2"].extrinsic, gt.camera_extrinsics["cam2"]
+    )
+    assert t_err < 1e-3 and r_err < 0.05
+
+
+def test_a_camera_connected_to_nothing_is_refused_by_name():
+    from mlti_cal.problem.initialize import InitializationError
+
+    system, _ = generate_dataset(num_cameras=3, num_frames=20, pixel_noise_std=0.0, seed=9)
+    # cam2 only sees frames nobody else sees.
+    _drop_views(system, lambda cam, f: (cam == "cam2") == (f >= 10))
+    with pytest.raises(InitializationError, match="cam2"):
+        initialize_system(system)
+
+
 def test_multiboard_multicamera_runs():
     system, gt = generate_dataset(
         num_cameras=2,

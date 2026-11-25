@@ -33,6 +33,7 @@ a target type from the UI when one is next started.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import importlib.util
 import os
 import sys
@@ -44,15 +45,22 @@ from typing import Any
 
 from mlti_cal.options import Option
 
-#: Directories scanned for third-party detectors. A `.py` file dropped in one of
-#: these is imported at startup and any `register_detector` call it makes takes
-#: effect -- which is what makes a new detector appear in the GUI on the next
-#: run without touching the installed package.
-PLUGIN_DIRS: list[Path] = [Path.home() / ".mlti_cal" / "detectors"]
+#: Directories scanned for plug-ins. A `.py` file dropped in one of these is
+#: imported at startup: a file following one of the function contracts in
+#: `docs/extending.md` is adapted and registered (see `mlti_cal.plugins`), and
+#: any `register_detector` call a file makes itself also takes effect -- which
+#: is what makes a new detector appear in the GUI on the next run without
+#: touching the installed package. `detectors/` is the original location and
+#: keeps working.
+PLUGIN_DIRS: list[Path] = [
+    Path.home() / ".mlti_cal" / "plugins",
+    Path.home() / ".mlti_cal" / "detectors",
+]
 
 #: Extra plugin directories, os.pathsep-separated. For tests, and for running a
-#: detector out of a working tree without installing it.
+#: plug-in out of a working tree without installing it. Both names are read.
 PLUGIN_PATH_ENV = "MLTI_CAL_DETECTOR_PATH"
+PLUGIN_PATH_ENVS = ("MLTI_CAL_PLUGIN_PATH", PLUGIN_PATH_ENV)
 
 #: Entry-point group for detectors shipped as installed packages.
 ENTRY_POINT_GROUP = "mlti_cal.detectors"
@@ -163,7 +171,8 @@ def _defaulted_fields(spec_cls: type) -> set[str]:
     return {
         f.name
         for f in dataclasses.fields(spec_cls)
-        if f.default is not dataclasses.MISSING or f.default_factory is not dataclasses.MISSING  # type: ignore[misc]
+        if f.init
+        and (f.default is not dataclasses.MISSING or f.default_factory is not dataclasses.MISSING)  # type: ignore[misc]
     }
 
 
@@ -266,8 +275,10 @@ def detector_settings_to_dict(settings: dict[str, Any]) -> dict:
 # -- plugin discovery -------------------------------------------------------
 def plugin_dirs() -> list[Path]:
     dirs = list(PLUGIN_DIRS)
-    extra = os.environ.get(PLUGIN_PATH_ENV, "")
-    return dirs + [Path(p) for p in extra.split(os.pathsep) if p.strip()]
+    for env in PLUGIN_PATH_ENVS:
+        extra = os.environ.get(env, "")
+        dirs += [Path(p) for p in extra.split(os.pathsep) if p.strip()]
+    return dirs
 
 
 def load_plugins(on_error: Callable[[str, str], None] | None = None) -> list[str]:
@@ -281,14 +292,22 @@ def load_plugins(on_error: Callable[[str, str], None] | None = None) -> list[str
     """
     before = set(DETECTOR_KINDS)
     for directory in plugin_dirs():
-        if not directory.is_dir():
-            continue
-        for path in sorted(directory.glob("*.py")):
-            if path.name.startswith("_"):
-                continue
-            _load_plugin_file(path, on_error)
+        load_plugin_dir(directory, on_error)
     _load_entry_points(on_error)
     return sorted(set(DETECTOR_KINDS) - before)
+
+
+def load_plugin_dir(
+    directory: str | Path, on_error: Callable[[str, str], None] | None = None
+) -> None:
+    """Import every plug-in file in one folder (`--plugins DIR` on the command line)."""
+    directory = Path(directory)
+    if not directory.is_dir():
+        return
+    for path in sorted(directory.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        _load_plugin_file(path, on_error)
 
 
 def _record_error(where: str, on_error: Callable[[str, str], None] | None) -> None:
@@ -299,7 +318,10 @@ def _record_error(where: str, on_error: Callable[[str, str], None] | None) -> No
 
 
 def _load_plugin_file(path: Path, on_error: Callable[[str, str], None] | None) -> None:
-    module_name = f"mlti_cal_plugin_{path.stem}"
+    # The folder is part of the module name, so `my_detector.py` in two plug-in
+    # folders are two modules rather than one silently replacing the other.
+    folder = hashlib.sha1(str(path.parent.resolve()).encode()).hexdigest()[:8]
+    module_name = f"mlti_cal_plugin_{folder}_{path.stem}"
     try:
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
@@ -307,6 +329,10 @@ def _load_plugin_file(path: Path, on_error: Callable[[str, str], None] | None) -
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
+        # Lazy: `mlti_cal.plugins` builds on this module.
+        from mlti_cal.plugins.loader import adopt
+
+        adopt(module, path)
     except Exception:
         sys.modules.pop(module_name, None)
         _record_error(str(path), on_error)

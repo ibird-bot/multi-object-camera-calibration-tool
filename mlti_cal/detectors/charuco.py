@@ -140,6 +140,10 @@ class CharucoDetector:
         self.settings.apply_to_charuco_params(charuco_params, spec.min_markers)
         self._detector.setCharucoParameters(charuco_params)
         self._warned_transposed = False
+        #: Images on which the alternative geometries may still be tried. A
+        #: wrong geometry fails on every image, so three negatives settle it
+        #: and a dataset of steep views stops paying for the test.
+        self._geometry_tests_left = 3
 
     @property
     def object_points(self) -> np.ndarray:
@@ -170,7 +174,7 @@ class CharucoDetector:
         corners, ids, marker_corners, marker_ids = self._detector.detectBoard(gray)
         n_markers = 0 if marker_ids is None else int(np.asarray(marker_ids).size)
         n_corners = 0 if ids is None else int(np.asarray(ids).size)
-        self._warn_if_grid_looks_transposed(n_markers, n_corners)
+        self._warn_if_grid_looks_transposed(n_markers, n_corners, gray)
         if corners is None or ids is None:
             return None
         corners = np.asarray(corners, dtype=float).reshape(-1, 2)
@@ -186,10 +190,25 @@ class CharucoDetector:
             kind="charuco",
         )
 
-    def _warn_if_grid_looks_transposed(self, n_markers: int, n_corners: int) -> None:
+    def _variant_corners(self, gray: np.ndarray, transposed: bool, legacy: bool) -> int:
+        """Corners the SAME image yields under a different board geometry."""
+        s = self.spec
+        size = (s.squares_y, s.squares_x) if transposed else (s.squares_x, s.squares_y)
+        ids = np.arange(*s.marker_id_range, dtype=np.int32)
+        board = cv2.aruco.CharucoBoard(size, s.square_length, s.marker_length, self.dictionary, ids)
+        board.setLegacyPattern(legacy)
+        det = cv2.aruco.CharucoDetector(board)
+        det.setDetectorParameters(self._detector.getDetectorParameters())
+        det.setCharucoParameters(self._detector.getCharucoParameters())
+        found = det.detectBoard(gray)[1]
+        return 0 if found is None else int(np.asarray(found).size)
+
+    def _warn_if_grid_looks_transposed(
+        self, n_markers: int, n_corners: int, gray: np.ndarray | None = None
+    ) -> None:
         """
-        Many markers decoded, zero corners interpolated -- almost always a wrong
-        squares_x/squares_y.
+        Markers decoded, zero corners interpolated: test whether a different
+        board geometry explains it, and say which one if so.
 
         This exact failure is silent and cost real debugging time: a 12x9 board
         entered as 9x12 decodes all 54 of its markers perfectly and then yields
@@ -198,30 +217,61 @@ class CharucoDetector:
         which are wrong. Marker IDs carry no orientation, so OpenCV cannot tell
         a transposed grid from a board that simply is not there.
 
-        The signature is unambiguous: plenty of markers, no corners. A partial
-        view at the frame edge shows few markers AND few corners, so it does not
-        trip this. Warned once per detector -- per image would be 11 identical
-        walls of text on this dataset alone.
+        The marker/corner counts alone are NOT a reliable signature. A correctly
+        configured 9x7 board tilted 75-80 degrees decodes 5-15 markers and
+        interpolates 0 corners -- measured, and it used to draw this warning
+        with advice that was wrong. So the counts only trigger a test: the
+        same image is re-detected as the transposed grid and with the
+        pre-OpenCV-4.6 marker layout, and the warning names whichever one
+        recovers corners. If neither does, nothing is said; the empty
+        detection is reported by the caller as it is for any image.
+
+        Warned once per detector -- per image would be 11 identical walls of
+        text on one real dataset alone. The test only runs on images showing
+        the signature, and on at most three of them, so it costs nothing on a
+        working board and little on a dataset of steep views.
         """
-        if self._warned_transposed or n_corners > 0 or n_markers < 4:
+        if self._warned_transposed or n_corners > 0 or n_markers < 4 or gray is None:
             return
-        self._warned_transposed = True
+        if self._geometry_tests_left <= 0:
+            return
+        self._geometry_tests_left -= 1
         s = self.spec
-        warnings.warn(
-            f"board {s.id!r}: decoded {n_markers} markers but interpolated 0 "
-            f"chessboard corners. The board is in frame and the dictionary is "
-            f"right, so the geometry is not: try squares_x={s.squares_y}, "
-            f"squares_y={s.squares_x} (currently {s.squares_x}x{s.squares_y}). "
-            f"If that is not it, the board may have been printed with the "
-            f"pre-OpenCV-4.6 marker layout.",
-            RuntimeWarning,
-            stacklevel=3,
-        )
+        fixes = {
+            (True, False): f"squares_x={s.squares_y}, squares_y={s.squares_x}",
+            (False, True): "the pre-OpenCV-4.6 (legacy) marker layout",
+            (True, True): (
+                f"squares_x={s.squares_y}, squares_y={s.squares_x} with the "
+                f"pre-OpenCV-4.6 (legacy) marker layout"
+            ),
+        }
+        legacy_now = bool(self.board.getLegacyPattern())
+        for (transposed, legacy), fix in fixes.items():
+            found = self._variant_corners(gray, transposed, legacy != legacy_now)
+            if found > 0:
+                self._warned_transposed = True
+                warnings.warn(
+                    f"board {s.id!r}: decoded {n_markers} markers but interpolated 0 "
+                    f"chessboard corners as configured "
+                    f"({s.squares_x}x{s.squares_y}). The same image gives {found} "
+                    f"corners with {fix}: the board geometry is entered wrong.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+                return
 
     def render(self, pixels_per_square: int = 100, margin: int = 20) -> np.ndarray:
-        """Render the board to an image -- used for printing and for tests."""
-        w = self.spec.squares_x * pixels_per_square
-        h = self.spec.squares_y * pixels_per_square
+        """
+        Render the board to an image -- used for printing and for tests.
+
+        The margin is ADDED around the board, so the image is `2 * margin`
+        larger than `squares * pixels_per_square`. `generateImage` shrinks the
+        board to fit whatever canvas it gets, and a printed square must come out
+        exactly the size asked for: `square_length` is the metric scale of the
+        whole calibration.
+        """
+        w = self.spec.squares_x * pixels_per_square + 2 * margin
+        h = self.spec.squares_y * pixels_per_square + 2 * margin
         return self.board.generateImage((w, h), marginSize=margin)
 
 

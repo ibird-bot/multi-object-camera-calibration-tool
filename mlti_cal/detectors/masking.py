@@ -61,6 +61,9 @@ class MaskGeometry:
     object_points: np.ndarray  # (M,3) indexed by corner id
     outline: np.ndarray  # (4,2) printed sheet in board coords
     pitch: float
+    #: False for a 3D object: no homography maps it into the image, so only the
+    #: padded hull of the points actually seen is painted out.
+    planar: bool = True
 
 
 def _homography_polygon(
@@ -118,7 +121,9 @@ def _hull_polygon(det: Detection, geom: MaskGeometry, padding: float) -> np.ndar
     ids = np.asarray(det.point_ids, dtype=int)
     if ids.max(initial=-1) >= geom.object_points.shape[0]:
         return None
-    board = geom.object_points[ids][:, :2]
+    # All three axes: identical for a flat board (z = 0), and the right span for
+    # a 3D object, whose depth would otherwise be ignored.
+    board = geom.object_points[ids]
     board_span = float(np.linalg.norm(board.max(0) - board.min(0)))
     image_span = float(np.linalg.norm(pts.max(0) - pts.min(0)))
     if board_span <= 0:
@@ -144,8 +149,12 @@ def mask_polygons(
         geom = geometry.get(det.board_id)
         if geom is None:
             continue
-        poly = _homography_polygon(
-            det, geom, settings.mask_padding_squares, settings.mask_min_coverage
+        poly = (
+            _homography_polygon(
+                det, geom, settings.mask_padding_squares, settings.mask_min_coverage
+            )
+            if geom.planar
+            else None
         )
         if poly is None:
             poly = _hull_polygon(det, geom, settings.mask_padding_squares)

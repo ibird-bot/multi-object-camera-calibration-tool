@@ -26,7 +26,14 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from mlti_cal.problem.reprojection import build_problem, extr_key, intr_key, write_back
+from mlti_cal.problem.graph import Problem
+from mlti_cal.problem.reprojection import (
+    ReprojectionResidual,
+    build_problem,
+    extr_key,
+    intr_key,
+    write_back,
+)
 from mlti_cal.problem.types import CalibrationSystem
 from mlti_cal.solvers.base import SolveOptions, per_corner_rms
 
@@ -124,6 +131,35 @@ def _subset(system: CalibrationSystem, frames: set[str]) -> CalibrationSystem:
     return sub
 
 
+def _loss_of(problem: Problem | None):
+    """The robust loss the template problem's reprojection residuals use."""
+    if problem is None:
+        return None
+    for r in problem.residuals:
+        if isinstance(r, ReprojectionResidual):
+            return r.loss
+    return None
+
+
+def _copy_freedom(target: Problem, template: Problem | None) -> None:
+    """
+    Give the camera blocks of `target` the template's pins and frozen blocks.
+
+    A fold must re-solve the SAME problem the user solved, on fewer frames. A
+    pinned k3 or a frozen extrinsic that is free in the folds measures the
+    held-out error of a different, more flexible model -- typically one that
+    overfits more, so the reported optimism belongs to a model nobody chose.
+    """
+    if template is None:
+        return
+    for key, blk in target.blocks.items():
+        src = template.blocks.get(key)
+        if src is None or not key.startswith(("intr:", "extr:")):
+            continue
+        blk.constant = blk.constant or src.constant
+        blk.free_mask = blk.free_mask & src.free_mask
+
+
 def cross_validate(
     system: CalibrationSystem,
     backend_name: str = "scipy",
@@ -131,6 +167,7 @@ def cross_validate(
     max_iterations: int = 200,
     seed: int = 0,
     on_fold: Callable[[FoldResult], None] | None = None,
+    template: Problem | None = None,
 ) -> CrossValResult:
     """
     k-fold cross-validation over frames.
@@ -139,6 +176,11 @@ def cross_validate(
     full re-solve, so on a real rig this runs for minutes -- a caller that shows
     nothing until the last fold is indistinguishable from one that has hung.
     Plain callable, no Qt: the core stays headless and the GUI adapts it.
+
+    `template` is the problem the user actually solved. Its robust loss, its
+    pinned intrinsic components and its frozen camera blocks are applied to
+    every fold. Without it each fold re-solves with a plain squared loss and
+    every camera parameter free.
 
     The system is NOT modified. Each fold works on a deep copy, so the values
     on screen are still the ones the user solved for when this returns.
@@ -151,6 +193,7 @@ def cross_validate(
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(frames))
     folds = np.array_split(order, k)
+    loss = _loss_of(template)
 
     out = CrossValResult()
     for i, test_idx in enumerate(folds):
@@ -158,7 +201,8 @@ def cross_validate(
         train_frames = set(frames) - test_frames
 
         train_sys = _subset(system, train_frames)
-        train_problem = build_problem(train_sys)
+        train_problem = build_problem(train_sys, loss=loss)
+        _copy_freedom(train_problem, template)
         get_backend(backend_name).solve(train_problem, SolveOptions(max_iterations=max_iterations))
         write_back(train_sys, train_problem)
         train_rms = per_corner_rms(train_problem)
@@ -168,7 +212,9 @@ def cross_validate(
         for cid, cam in test_sys.cameras.items():
             cam.params = train_sys.cameras[cid].params.copy()
             cam.extrinsic = train_sys.cameras[cid].extrinsic.copy()
-        test_problem = build_problem(test_sys, optimize_intrinsics=False, optimize_extrinsics=False)
+        test_problem = build_problem(
+            test_sys, loss=loss, optimize_intrinsics=False, optimize_extrinsics=False
+        )
         for cid in test_sys.cameras:
             test_problem.blocks[intr_key(cid)].constant = True
             test_problem.blocks[extr_key(cid)].constant = True

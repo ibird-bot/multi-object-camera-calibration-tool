@@ -199,8 +199,27 @@ def test_disjoint_frame_names_are_refused(tmp_path):
         cameras=[CameraConfig(id="cam0", image_dir=a), CameraConfig(id="cam1", image_dir=b)],
         boards=[BOARD],
     )
-    with pytest.raises(ValueError, match="No frame name is common"):
+    with pytest.raises(ValueError, match="share no frame name"):
         build_system_from_config(config)
+
+
+def test_a_chain_of_shared_frame_names_is_accepted(tmp_path):
+    """
+    No frame is seen by all three cameras, but each shares frames with a
+    neighbour -- a rig calibratable through the middle camera. Regression: this
+    was refused because the check demanded a frame common to EVERY camera.
+    """
+    views = _warped_views(8, seed=7)
+    dirs = [
+        _write_camera_dir(tmp_path, f"cam{i}", views[2 * i : 2 * i + 4], [str(s) for s in stems])
+        for i, stems in enumerate([range(0, 4), range(2, 6), range(4, 8)])
+    ]
+    config = CalibrationConfig(
+        cameras=[CameraConfig(id=f"cam{i}", image_dir=d) for i, d in enumerate(dirs)],
+        boards=[BOARD],
+    )
+    _, stats = build_system_from_config(config)
+    assert stats["shared_frames"] == 4  # stems 2, 3, 4, 5
 
 
 def test_mixed_resolution_is_refused(tmp_path):

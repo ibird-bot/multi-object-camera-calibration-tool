@@ -462,6 +462,23 @@ class EnhancedUnified(CameraModel):
 
     _DEN_EPS = 1e-9
 
+    def default_params(self, image_size: tuple[int, int]) -> np.ndarray:
+        """
+        Pinhole, but at beta = 1 rather than the generic all-zero start.
+
+        At alpha = beta = 0 the model is a pinhole AND a stationary point: with
+        beta = 0, rho = |z| and den = z for every alpha, so d(den)/d(alpha) =
+        rho - z = 0, while d(den)/d(beta) is proportional to alpha = 0. Both
+        distortion gradients vanish identically, and no solver ever leaves.
+        Measured on the TUM VI fisheye rig, the solve ended at exactly
+        alpha = beta = 0 with 3.36 px RMS, where Double Sphere reached 0.34 px.
+        At beta = 1 the model is still exactly pinhole (alpha = 0 gives den =
+        z), but d(den)/d(alpha) = |X| - z, nonzero off axis.
+        """
+        p = super().default_params(image_size)
+        p[5] = 1.0
+        return p
+
     def valid_mask(self, X: np.ndarray, params: np.ndarray | None = None) -> np.ndarray:
         """Positive denominator, not z > 0 -- see DoubleSphere.valid_mask."""
         Xa = np.asarray(X, dtype=float)
@@ -1020,8 +1037,14 @@ MODEL_LABELS: dict[str, str] = {
 
 
 def register_model(cls: type[CameraModel]) -> type[CameraModel]:
-    """Decorator to add a third-party model to the registry."""
+    """
+    Decorator to add a third-party model to the registry.
+
+    Its label is the class's `label` attribute when it has one, else its name,
+    so a plug-in model never shows up in the GUI as a missing label.
+    """
     _MODELS[cls.name] = cls
+    MODEL_LABELS[cls.name] = str(getattr(cls, "label", "") or cls.name)
     return cls
 
 

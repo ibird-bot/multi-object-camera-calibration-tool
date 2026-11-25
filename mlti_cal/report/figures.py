@@ -126,7 +126,9 @@ def draw_uncertainty(fig, report, system, cam: str) -> None:
         interpolation="bilinear",
     )
     add_colorbar(fig, im, ax, "1-sigma projection error (px)", attached=True)
-    note = "how far a projected point could be wrong, given the parameter covariance"
+    note = "how far a point fixed to the boards could project wrong, given the covariance"
+    if m.reference == "camera":
+        note = "camera-frame looseness (point fixed in camera coordinates), not projection error"
     if m.invalid_fraction > 0.001:
         note = f"{m.invalid_fraction * 100:.0f}% masked: distortion not invertible there"
     set_title(
@@ -304,12 +306,49 @@ def _diverging(matrix, ax, labels_x=None, labels_y=None):
         aspect="auto",
     )
     if labels_y is not None:
-        ax.set_yticks(range(len(labels_y)))
-        ax.set_yticklabels(labels_y, fontsize=TICK_SIZE)
+        _label_axis(ax, labels_y, "y")
     if labels_x is not None:
-        ax.set_xticks(range(len(labels_x)))
-        ax.set_xticklabels(labels_x, fontsize=TICK_SIZE, rotation=45, ha="right")
+        _label_axis(ax, labels_x, "x")
     return im
+
+
+#: Above this many parameters, one tick per parameter is an unreadable smear
+#: (four cameras are ~40 rows); label each camera's block once instead.
+_MAX_TICKS = 24
+
+
+def _label_axis(ax, labels: list[str], axis: str) -> None:
+    """
+    Every parameter when there are few, one label per camera block when many.
+
+    Labels read "fx (cam0)"; the bracket names the block. Blocks are separated
+    by a thin line, and the exact cell is still named by hovering over it.
+    """
+    if len(labels) <= _MAX_TICKS:
+        if axis == "y":
+            ax.set_yticks(range(len(labels)))
+            ax.set_yticklabels(labels, fontsize=TICK_SIZE)
+        else:
+            ax.set_xticks(range(len(labels)))
+            ax.set_xticklabels(labels, fontsize=TICK_SIZE, rotation=45, ha="right")
+        return
+    groups: list[tuple[str, int, int]] = []
+    for i, label in enumerate(labels):
+        name = label[label.rfind("(") + 1 : label.rfind(")")] if "(" in label else label
+        if groups and groups[-1][0] == name:
+            groups[-1] = (name, groups[-1][1], i + 1)
+        else:
+            groups.append((name, i, i + 1))
+    ticks = [0.5 * (start + end - 1) for _, start, end in groups]
+    names = [name for name, _, _ in groups]
+    for _, start, _ in groups[1:]:
+        (ax.axhline if axis == "y" else ax.axvline)(start - 0.5, color="#555555", lw=0.8)
+    if axis == "y":
+        ax.set_yticks(ticks)
+        ax.set_yticklabels(names, fontsize=LABEL_SIZE)
+    else:
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(names, fontsize=LABEL_SIZE)
 
 
 def draw_correlation(fig, report, system, cam: str) -> None:
@@ -361,7 +400,8 @@ def draw_correlation(fig, report, system, cam: str) -> None:
 
     # -- worst pairs ----------------------------------------------------
     ax2 = fig.add_subplot(gs[0, 1])
-    pairs = blocks.get("top_pairs", [])[:12][::-1]
+    # Eight: enough to show the pattern, few enough that every label is legible.
+    pairs = blocks.get("top_pairs", [])[:8][::-1]
     if pairs:
         values = [r for _, _, r in pairs]
         names = [f"{a}  vs  {b}" for a, b, _ in pairs]

@@ -288,8 +288,12 @@ def build_report(
     if cv_obj is None and do_crossval:
         from mlti_cal.report.crossval import cross_validate
 
+        # Same backend as the solve being reported on, as the GUI already does.
+        backend = solve_result.backend if solve_result is not None else "scipy"
         try:
-            cv_obj = cross_validate(system, k=crossval_folds)
+            cv_obj = cross_validate(
+                system, backend_name=backend, k=crossval_folds, template=problem
+            )
         except ValueError:
             cv_obj = None
     cv_dict = cv_obj.to_dict() if cv_obj is not None else None

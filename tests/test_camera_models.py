@@ -166,6 +166,27 @@ def test_projective_models_can_see_past_ninety_degrees(name):
     assert not np.any(model.valid_mask(behind))
 
 
+def test_eucm_default_start_is_pinhole_but_not_a_stationary_point():
+    """
+    EUCM's start must be a pinhole the solver can actually leave.
+
+    At alpha = beta = 0 both distortion gradients are identically zero (beta = 0
+    makes den = z for every alpha; d(den)/d(beta) is proportional to alpha), so
+    the solve never moves off the pinhole. That is exactly what happened on the
+    real TUM VI fisheye rig: 3.36 px RMS against 0.34 px for Double Sphere. The
+    synthetic end-to-end test did not catch it because a pinhole fits that
+    narrow synthetic lens under its 0.55 px threshold.
+    """
+    model = get_model("eucm")
+    p = model.default_params((512, 512))
+    X = np.array([[0.6, -0.4, 1.0], [0.1, 0.2, 1.0]])
+    uv, J_p, _ = model.d_project(p, X)
+    pinhole = p[:2] * X[:, :2] / X[:, 2:] + p[2:4]
+    assert uv == pytest.approx(pinhole), "the start must still be exactly pinhole"
+    alpha_grad = np.abs(J_p[:, :, 4]).max()
+    assert alpha_grad > 1.0, f"d(uv)/d(alpha) = {alpha_grad:.3g}: the solver cannot leave"
+
+
 #: Same models as `NEW_MODELS`, but Thin Prism carries the `slow` marker. With
 #: 16 intrinsics per camera it needs thousands of scipy iterations and takes
 #: ~150s of a ~250s suite -- 60% of the total runtime for one parameter set.
@@ -249,13 +270,60 @@ def test_projection_reproduces_its_own_data(name):
 
 
 @pytest.mark.parametrize("name", NEW_MODELS)
-def test_bootstrap_reports_nan_rather_than_opencvs_own_rms(name):
+def test_bootstrap_reports_the_fit_in_this_model_not_opencvs(name):
     """
-    OpenCV fits a PINHOLE to get K for these models.
-
-    Reporting that fit's RMS as the camera's initialisation error would credit
-    this model with a number produced by a different one.
+    OpenCV fits a PINHOLE to get K for these models, and the camera is then
+    fitted again in its own model. The RMS reported is that second fit's:
+    OpenCV's would credit this model with a number produced by a different one.
+    With 0.3 px noise per coordinate, an honest per-corner RMS is about 0.42.
     """
     system, _ = generate_dataset(num_frames=8, num_cameras=1, seed=1, model_name=name)
     report = initialize_system(system)
-    assert all(np.isnan(v) for v in report["intrinsics_rms"].values())
+    (rms,) = report["intrinsics_rms"].values()
+    assert 0.2 < rms < 0.6, f"{name}: bootstrap RMS {rms:.3f} px"
+
+
+@pytest.mark.slow  # plans the 30-frame example scene and bootstraps 4 cameras: ~4 s
+def test_a_strongly_distorted_lens_gets_a_usable_extrinsic():
+    """
+    Regression: a wide Double Sphere camera was bootstrapped from a pinhole K
+    with zero distortion, and every PnP pose built on that K was biased the
+    same way. On the example rig its extrinsic started 0.8 m and 27 degrees
+    off, and cam3 -- chained through it -- 1.2 m and 46 degrees.
+
+    Corner-level data from the example rig's own geometry: full-sensor
+    coverage is what makes the wide lens's distortion matter. (The generic
+    synthetic generator covers only the image centre, where a pinhole start
+    is nearly right and this bug does not show.)
+    """
+    from mlti_cal.io.render import _project, board_points, plan_scene
+    from mlti_cal.io.synthetic import relative_extrinsic_error
+    from mlti_cal.problem.types import Board, CalibrationSystem, Camera, Observation
+
+    scene = plan_scene(num_frames=30)
+    rng = np.random.default_rng(0)
+    system = CalibrationSystem()
+    for c in scene.cameras:
+        system.add_camera(Camera(c.id, c.model_name, c.image_size, is_reference=c.id == "cam0"))
+    points = {b["id"]: board_points(b) for b in scene.boards}
+    for bid, pts in points.items():
+        system.add_board(Board(bid, pts))
+    for (frame, bid), pose in scene.poses.items():
+        for c in scene.cameras:
+            uv = _project(c, points[bid], pose)
+            w, h = c.image_size
+            with np.errstate(invalid="ignore"):
+                ok = (uv[:, 0] > 4) & (uv[:, 0] < w - 4) & (uv[:, 1] > 4) & (uv[:, 1] < h - 4)
+            if ok.sum() >= 8:
+                noisy = uv[ok] + rng.normal(scale=0.2, size=(ok.sum(), 2))
+                system.add_observation(Observation(frame, c.id, bid, np.flatnonzero(ok), noisy))
+
+    initialize_system(system)
+    truth = {c.id: c.extrinsic for c in scene.cameras}
+    # A START, not a result: measured at ~65-80 mm and 2-3.5 degrees, from
+    # which the full solve converges to ~1 mm and 0.15 degrees. The limits are
+    # there to catch the failure above, not to grade the bootstrap.
+    for cid in ("cam2", "cam3"):
+        t_err, r_err = relative_extrinsic_error(system.cameras[cid].extrinsic, truth[cid])
+        assert t_err < 0.15, f"{cid}: bootstrap extrinsic off by {t_err * 1000:.1f} mm"
+        assert r_err < 5.0, f"{cid}: bootstrap extrinsic off by {r_err:.2f} deg"

@@ -12,7 +12,7 @@ from matplotlib.backends.backend_qtagg import (
     NavigationToolbar2QT,
 )
 from matplotlib.figure import Figure
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QLabel,
@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from mlti_cal.gui import theme
 
 
 def to_qimage(array: np.ndarray) -> QImage:
@@ -132,53 +134,164 @@ class PlotCanvas(QWidget):
         self.canvas.draw_idle()
 
     def message(self, text: str):
-        """Placeholder text for a plot that has no data yet."""
-        fig = self.clear()
-        ax = fig.add_subplot(111)
-        ax.text(0.5, 0.5, text, ha="center", va="center", wrap=True, fontsize=10)
-        ax.set_axis_off()
-        self.draw()
+        """Placeholder text for a plot that has no data yet, in the window's theme."""
+        with theme.mpl_context(self.figure) as p:
+            fig = self.clear()
+            fig.set_facecolor(p.surface)
+            ax = fig.add_subplot(111)
+            ax.text(0.5, 0.5, text, ha="center", va="center", wrap=True, fontsize=10, color=p.muted)
+            ax.set_axis_off()
+            self.draw()
 
 
 class ImageView(QScrollArea):
-    """Scrollable image display with fit-to-window toggling."""
+    """Scrollable image display with fit-to-window toggling, wheel zoom and drag-to-pan."""
+
+    #: Multiplier applied per wheel notch, and the range zoom is clamped to.
+    ZOOM_STEP = 1.25
+    MIN_ZOOM = 0.1
+    MAX_ZOOM = 20.0
+    #: Longest side of the zoomed pixmap. The pixmap is rebuilt at full zoomed
+    #: size, so without a cap a 4000 px image at 20x would need ~25 GB.
+    MAX_ZOOMED_PX = 16000
+
+    #: Emitted when a wheel-zoom turns fit-to-window off on its own, so an
+    #: external "fit" checkbox can follow instead of silently going stale.
+    fit_changed = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # State before `setWidget`: it installs QScrollArea's own event filter,
+        # which calls the `eventFilter` override below while __init__ is running.
+        self._pixmap: QPixmap | None = None
+        self._fit = True
+        self._zoom = 1.0
+        self._panning = False
+        self._pan_start = QPoint()
+        self._pan_scroll_start = QPoint()
         self._label = QLabel("no image")
         self._label.setAlignment(Qt.AlignCenter)
         self._label.setMinimumSize(1, 1)
         self.setWidget(self._label)
-        self.setWidgetResizable(True)
-        self._pixmap: QPixmap | None = None
-        self._fit = True
+        # Not resizable: the label is sized in `_rescale` to the picture, or to
+        # the window when the picture is smaller. A resizable label stayed at
+        # window size (its minimum size is 1x1), so a zoomed picture was clipped
+        # around its centre and its edges could not be scrolled to.
+        self.setWidgetResizable(False)
+        # Mouse presses land on the label, which fills the viewport, and do not
+        # propagate up the way wheel events do -- so panning is caught there.
+        self._label.installEventFilter(self)
 
     def set_image(self, array: np.ndarray | None):
         if array is None:
             self._pixmap = None
             self._label.setText("no image")
+            self._label.resize(self.viewport().size())
             return
         self._pixmap = QPixmap.fromImage(to_qimage(array))
+        self._zoom = 1.0
         self._rescale()
 
     def set_fit(self, fit: bool):
         self._fit = fit
+        if fit:
+            self._zoom = 1.0
         self._rescale()
+
+    def _fit_scale(self) -> float:
+        if self._pixmap is None or self._pixmap.isNull():
+            return 1.0
+        vp, pm = self.viewport().size(), self._pixmap.size()
+        return min(vp.width() / pm.width(), vp.height() / pm.height())
 
     def _rescale(self):
         if self._pixmap is None:
+            self._label.resize(self.viewport().size())
             return
         if self._fit:
             target = self.viewport().size()
-            self._label.setPixmap(
-                self._pixmap.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            )
         else:
-            self._label.setPixmap(self._pixmap)
+            target = self._pixmap.size() * self._zoom
+        shown = self._pixmap.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        view = self.viewport().size()
+        self._label.setPixmap(shown)
+        self._label.resize(max(shown.width(), view.width()), max(shown.height(), view.height()))
 
     def resizeEvent(self, event):  # Qt API requires this name
         super().resizeEvent(event)
         self._rescale()
+
+    def wheelEvent(self, event):  # Qt API requires this name
+        delta = event.angleDelta().y()
+        if self._pixmap is None or self._pixmap.isNull() or delta == 0:
+            super().wheelEvent(event)
+            return
+        if self._fit:
+            # Start from the size on screen, so the image does not jump.
+            self._zoom = self._fit_scale()
+            self._fit = False
+            self.fit_changed.emit(False)
+        factor = self.ZOOM_STEP if delta > 0 else 1 / self.ZOOM_STEP
+        longest = max(self._pixmap.width(), self._pixmap.height())
+        max_zoom = min(self.MAX_ZOOM, self.MAX_ZOOMED_PX / longest)
+        # The point of the image under the mouse must stay under the mouse.
+        # Without this the scroll position never moves, so every zoom grows the
+        # picture away from the top-left or the centre and the edges cannot be
+        # reached with the cursor.
+        cursor = event.position().toPoint()
+        before = self._image_fraction_at(cursor)
+        self._zoom = min(max_zoom, max(self.MIN_ZOOM, self._zoom * factor))
+        self._rescale()
+        self._scroll_to_fraction(before, cursor)
+        event.accept()
+
+    def _shown_pixmap_size(self) -> QSize:
+        pm = self._label.pixmap()
+        return pm.size() if pm is not None and not pm.isNull() else QSize(1, 1)
+
+    def _content_offset(self) -> QPoint:
+        """Where the picture starts inside the label: it is centred when smaller."""
+        pm, lab = self._shown_pixmap_size(), self._label.size()
+        return QPoint(
+            max(0, (lab.width() - pm.width()) // 2), max(0, (lab.height() - pm.height()) // 2)
+        )
+
+    def _image_fraction_at(self, viewport_pos: QPoint) -> tuple[float, float]:
+        """The picture point under a viewport position, as 0..1 of its width and height."""
+        pm, off = self._shown_pixmap_size(), self._content_offset()
+        x = self.horizontalScrollBar().value() + viewport_pos.x() - off.x()
+        y = self.verticalScrollBar().value() + viewport_pos.y() - off.y()
+        return (min(1.0, max(0.0, x / pm.width())), min(1.0, max(0.0, y / pm.height())))
+
+    def _scroll_to_fraction(self, fraction: tuple[float, float], viewport_pos: QPoint) -> None:
+        """Scroll so that picture point `fraction` sits under `viewport_pos`."""
+        pm = self._shown_pixmap_size()
+        hbar, vbar = self.horizontalScrollBar(), self.verticalScrollBar()
+        off = self._content_offset()
+        hbar.setValue(round(fraction[0] * pm.width() + off.x() - viewport_pos.x()))
+        vbar.setValue(round(fraction[1] * pm.height() + off.y() - viewport_pos.y()))
+
+    def eventFilter(self, obj, event):
+        if obj is self._label and not self._fit:
+            etype = event.type()
+            if etype == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._panning = True
+                self._pan_start = event.globalPosition().toPoint()
+                self._pan_scroll_start = QPoint(
+                    self.horizontalScrollBar().value(), self.verticalScrollBar().value()
+                )
+                self._label.setCursor(Qt.ClosedHandCursor)
+                return True
+            if etype == QEvent.MouseMove and self._panning:
+                delta = event.globalPosition().toPoint() - self._pan_start
+                self.horizontalScrollBar().setValue(self._pan_scroll_start.x() - delta.x())
+                self.verticalScrollBar().setValue(self._pan_scroll_start.y() - delta.y())
+                return True
+            if etype == QEvent.MouseButtonRelease and self._panning:
+                self._panning = False
+                self._label.setCursor(Qt.ArrowCursor)
+                return True
+        return super().eventFilter(obj, event)
 
 
 class ThumbnailStrip(QListWidget):
@@ -202,8 +315,14 @@ class ThumbnailStrip(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setViewMode(QListWidget.IconMode)
-        self.setIconSize(QSize(self.THUMB, self.THUMB))
-        self.setGridSize(QSize(self.THUMB + 20, self.THUMB + 32))
+        # Camera images are wider than tall. A square icon cell left a band of
+        # empty space between each picture and its caption.
+        icon_h = self.THUMB * 3 // 4
+        self.setIconSize(QSize(self.THUMB, icon_h))
+        # Two caption lines, at the presentation scale when a demo is recorded:
+        # the widget's own font is not styled yet at this point.
+        caption_h = int(2 * self.fontMetrics().lineSpacing() * max(1.0, theme.current_scale())) + 10
+        self.setGridSize(QSize(self.THUMB + 16, icon_h + caption_h))
         self.setResizeMode(QListWidget.Adjust)
         self.setMovement(QListWidget.Static)
         self.setUniformItemSizes(True)
@@ -230,8 +349,12 @@ class ThumbnailStrip(QListWidget):
         for key, label in keys_and_labels:
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, key)
-            item.setTextAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+            item.setTextAlignment(Qt.AlignHCenter | Qt.AlignTop)
             item.setToolTip(key)
+            # Explicit, because uniform item sizes are taken from the FIRST item,
+            # which has no icon yet: with a larger font that size came out
+            # smaller than the icon and every thumbnail was clipped to a corner.
+            item.setSizeHint(self.gridSize() - QSize(4, 4))
             self.addItem(item)
             self._items[key] = item
 

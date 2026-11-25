@@ -48,6 +48,34 @@ This is also the fastest way to see whether an install is healthy, and it is
 the same code path the GUI runs, so a CLI result and a GUI result never
 disagree.
 
+## A full example: four cameras, three boards, rendered images
+
+`examples/rig_4cam` renders a complete capture -- 120 images -- of a four-camera
+rig fanned over 100 degrees, one of them a wide-angle Double Sphere lens, with
+two Charuco boards and an asymmetric dot grid. The two outer cameras never see
+the same board, so the rig is only solvable by chaining through the middle
+cameras. Ground truth is written next to the images.
+
+![The GUI on the four-camera example: detection with per-board colours, the starting point, and a solve to 0.13 px](docs/images/rig4cam.gif)
+
+```bash
+python examples/rig_4cam/make_dataset.py            # ~3 minutes, deterministic
+mlti-cal calibrate examples/rig_4cam/config.json --backend ceres --crossval -o Output/rig_4cam
+```
+
+Run both from the repository root. Measured on this example: 0.131 px RMS,
+every extrinsic within 0.5 mm and 0.03 degrees of the truth, held-out error
+0.99x the training error. The report also flags that the wide lens's focal
+length and `xi` cannot be separated by this data (correlation +0.999) -- which
+is true, and is why their individual values differ from the truth while the
+lens still projects to within 0.3 px of it.
+
+Without Ceres, `--backend scipy` gives the same result, final cost and RMS
+identical to Ceres, in 46 s (Ceres: 2.7 s; measured on an i7-12700H, solve
+only). Most of the old gap was not the algorithm: OpenBLAS's default thread
+pool made each dense SVD ~10x slower on hybrid CPUs, and the scipy backend now
+caps it at `num_threads` (default 1).
+
 ## Requirements
 
 Python 3.12.
@@ -103,7 +131,7 @@ each also written to disk by **Export...**:
 
 | Figure | What it answers |
 |---|---|
-| Projection uncertainty | How far a projected point could be wrong at a stated range, per pixel |
+| Projection uncertainty | How far a point fixed relative to the boards could project wrong at a stated range, per pixel |
 | Residual field | Per-corner error arrows; structure here is model inadequacy RMS cannot see |
 | Residual map | Per-cell RMS across the sensor, and the per-cell **mean** vector -- averaging cancels random error, so what survives is systematic bias |
 | Correlations | Which parameters the data cannot tell apart: the labelled camera block, the worst pairs, and camera parameters against board poses |
@@ -133,6 +161,22 @@ a GUI run produce identical numbers. Export writes `report.json`,
 one PNG per figure, each rendered at a size chosen for its content rather than
 inherited from the window.
 
+## Validation against other tools
+
+Checked on public data against independent calibration tools. Where both tools
+are given the same corners, differences come from the solvers alone.
+
+| Compared with | Data | Result |
+|---|---|---|
+| [mrcal](https://mrcal.secretsauce.net/) 2.4.1 | 1 camera, 84 real images | Identical RMS (0.524893 px); projection uncertainty within 1.5% at every pixel |
+| mrcal and OpenCV | Real stereo pair | Identical RMS to mrcal, uncertainty ratio 1.021 (exactly the degrees-of-freedom factor); OpenCV's intrinsics within 1.1 sigma |
+| [Kalibr](https://github.com/ethz-asl/kalibr) (published) | TUM VI fisheye stereo, real | Rotation within 0.024 deg, baseline within 0.5 mm of 101 mm |
+| [MC-Calib](https://github.com/rameau-fr/MC-Calib) | 6 real cameras, no ground truth | 0.3736 vs 0.3754 px on identical corners; poses within 0.022 deg |
+| MC-Calib and ground truth | 5 rendered cameras | Poses within 1.3 mm and 0.033 deg of the truth; MC-Calib's own about twice as close |
+| [BabelCalib](https://github.com/ylochman/babelcalib) benchmark | 8 real fisheye lenses, up to 250 deg | Held-out 0.25 px with Double Sphere or EUCM, level with Kalibr; Kannala-Brandt and FOV fail past 90 deg off-axis |
+
+Method, limits and how to reproduce every row: [`docs/validation.md`](docs/validation.md).
+
 ## Supported camera models
 
 Eight camera models, each with analytic Jacobians checked against finite
@@ -141,24 +185,43 @@ differences.
 | Shown as | id | params | For |
 |---|---|---|---|
 | OpenCV | `pinhole_radtan` | 9 | Normal and wide lenses. Start here. |
-| OpenCV Fisheye | `fisheye_kb` | 8 | Kannala-Brandt equidistant fisheye |
+| OpenCV Fisheye | `fisheye_kb` | 8 | Kannala-Brandt equidistant fisheye, up to 180 degrees in total |
 | Double Sphere | `double_sphere` | 6 | Fisheye, 2 distortion params, well conditioned |
 | Enhanced Unified | `eucm` | 6 | Fisheye and catadioptric, 2 params |
 | Thin Prism | `thin_prism` | 16 | Rational radial + tangential + prism |
 | Matlab | `matlab` | 10 | OpenCV plus a skew term |
-| FOV | `fov` | 5 | One parameter: the lens field of view |
+| FOV | `fov` | 5 | One parameter: the lens field of view, up to 180 degrees in total |
 | Halcon Division | `halcon_division` | 5 | One parameter, closed-form inverse |
 
-## Add your own detector
+## Bring your own detector, object and lens
 
-Detectors are a plugin point, not a hardcoded list. Drop a `.py` file in
-`~/.mlti_cal/detectors/` (or ship one as a package with an `mlti_cal.detectors`
-entry point) and it appears in the GUI's `+ Object` menu next time the app
-starts -- nothing in the installed package changes, and a third-party detector
-reaches detection through the exact same path the built-ins use. See
-[`docs/writing-a-detector.md`](docs/writing-a-detector.md) for the interface
-and [`examples/detectors/aruco_grid.py`](examples/detectors/aruco_grid.py) for
-a complete, working example.
+Use your own target detection and decoding, your own calibration object (flat
+or 3D) and your own camera model, without modifying this package. Adapt them
+to three fixed contracts:
+
+```python
+def detect(image, settings):  # -> (N, 3) float array: [target_id, x, y]
+    ...
+```
+```
+id, x, y, z                        # the object: one line per target, metres
+```
+```python
+def project(params, points):  # -> (N, 2) pixels; derivatives optional
+    ...
+```
+
+Each is one Python file dropped in `~/.mlti_cal/plugins/`. Every result is
+checked before it is used, and a plug-in that breaks its contract is reported
+and skipped, never patched up. `mlti-cal plugins check FILE` runs the same
+checks for the team writing it.
+
+Contracts, conventions and guarantees: [`docs/extending.md`](docs/extending.md).
+Templates: [`examples/plugins/`](examples/plugins/). For a working example of
+all three together (a 3D marker cube, a short ArUco detector and a lens given
+only as a projection function), see `examples/custom_object`. It calibrates to within
+0.34 mm of the ground truth. A detector needing more control than one function
+can still register a full kind ([`docs/writing-a-detector.md`](docs/writing-a-detector.md)).
 
 ## Coordinate conventions
 

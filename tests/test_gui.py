@@ -420,6 +420,24 @@ def test_invalid_detector_settings_are_refused_not_applied(qapp, monkeypatch):
     assert session.detector_settings["charuco"].adaptive_thresh_win_size_min == 3
 
 
+def test_configs_are_opened_and_saved_from_the_file_menu(qapp):
+    """The Setup page keeps one button, Run detection; configs moved to File."""
+    from PySide6.QtWidgets import QPushButton
+
+    from mlti_cal.gui.app import MainWindow
+
+    w = MainWindow()
+    actions = [
+        a.text().replace("&", "")
+        for m in w.menuBar().actions()
+        for a in (m.menu().actions() if m.menu() else [])
+    ]
+    assert "Open config..." in actions
+    assert "Save config..." in actions
+    buttons = [b.text() for b in w.detection.findChildren(QPushButton)]
+    assert not any("config" in b.lower() for b in buttons)
+
+
 def test_detector_settings_are_reachable_only_from_the_menu_bar(qapp):
     """
     One way in. A second control on the Setup tab could fall out of step with
@@ -557,9 +575,10 @@ def test_solver_options_follow_the_selected_backend(qapp):
     """
     Each backend shows its own options and only the common ones it READS.
 
-    scipy has no thread count -- rendering one beside it would be a control that
-    silently does nothing, which is the failure mode this whole panel exists to
-    remove.
+    A common option is shown only beside a backend that reads it -- a control
+    that silently does nothing is the failure mode this whole panel exists to
+    remove. Both backends read `num_threads` (scipy as its BLAS thread cap),
+    so the difference between the panels is in the backend-specific options.
     """
     from mlti_cal.gui.app import MainWindow
     from mlti_cal.solvers.catalog import options_for
@@ -576,7 +595,8 @@ def test_solver_options_follow_the_selected_backend(qapp):
         assert backend in w.optimization.options_box.title()
 
     assert "num_threads" in seen["ceres"]
-    assert "num_threads" not in seen["scipy"], "scipy ignores it"
+    assert "num_threads" in seen["scipy"], "scipy caps its BLAS threads with it"
+    assert "dense_column_limit" in seen["scipy"] - seen["ceres"]
     assert seen["scipy"] != seen["ceres"], "the panel must actually change"
 
 
@@ -1573,3 +1593,49 @@ def test_the_object_menu_offers_every_implemented_kind(qapp):
     actions = {a.text(): a for a in button.menu().actions()}
     for kind in DETECTOR_KINDS.values():
         assert actions[kind.label].isEnabled() is kind.implemented, kind.label
+
+
+def test_wheel_zoom_keeps_the_point_under_the_cursor_even_at_the_edges(qapp):
+    """Zoom anchored at the mouse: the corners of a zoomed image must be reachable."""
+    import numpy as np
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+
+    from mlti_cal.gui.widgets import ImageView
+
+    view = ImageView()
+    view.resize(800, 600)
+    view.show()
+    view.set_image(np.zeros((1000, 1600, 3), np.uint8))
+    qapp.processEvents()
+
+    def wheel(pos: QPoint) -> None:
+        event = QWheelEvent(
+            QPointF(pos),
+            QPointF(view.viewport().mapToGlobal(pos)),
+            QPoint(0, 0),
+            QPoint(0, 120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.NoScrollPhase,
+            False,
+        )
+        view.wheelEvent(event)
+        qapp.processEvents()
+
+    for pos in (QPoint(5, 5), QPoint(790, 590), QPoint(400, 300)):
+        view.set_fit(True)
+        qapp.processEvents()
+        before = view._image_fraction_at(pos)
+        for _ in range(6):
+            wheel(pos)
+        after = view._image_fraction_at(pos)
+        assert view._zoom > 1.5
+        assert abs(after[0] - before[0]) < 0.02 and abs(after[1] - before[1]) < 0.02, (
+            pos,
+            before,
+            after,
+        )
+    assert view.horizontalScrollBar().maximum() > 0, "a zoomed picture must be scrollable"
+    view.set_image(None)
+    assert view._label.size() == view.viewport().size()

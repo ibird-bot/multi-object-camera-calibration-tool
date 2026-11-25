@@ -1,5 +1,10 @@
 # Writing a detector
 
+> **Start with [extending.md](extending.md).** Most detectors fit its one-function
+> contract: `detect(image, settings)` returns `[target_id, x, y]` rows, and the
+> object is a points file. This page is the advanced route, for a detector that
+> needs its own board-geometry fields or masking behaviour.
+
 A detector is one `DetectorKind`, registered. Everything else — the config
 format, the GUI table, the pipeline ordering, the overlay — is a consequence of
 what that declaration says. Nothing in `mlti_cal` names any particular detector,

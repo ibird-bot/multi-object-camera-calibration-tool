@@ -17,12 +17,14 @@ from __future__ import annotations
 import math
 import time
 
+from matplotlib.ticker import MaxNLocator
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -30,6 +32,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTreeWidget,
@@ -38,6 +41,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mlti_cal.gui import theme
+from mlti_cal.gui.components import MetricCard, Section, primary, set_role
 from mlti_cal.gui.log_console import with_source
 from mlti_cal.gui.session import (
     CrossValWorker,
@@ -113,16 +118,25 @@ class OptimizationView(QWidget):
         self._refresh_init_button()
 
     def _build(self):
+        """
+        Left: what is solved for (parameters, solver). Right: the run, in order --
+        starting point, actions, results, convergence. Advanced backend options
+        start folded: they are rarely touched and were half the page.
+        """
         root = QHBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
         split = QSplitter(Qt.Horizontal)
         root.addWidget(split)
 
-        # ---------------- left: parameters -----------------------------
+        # ---------------- left: parameters and solver ------------------
         left = QWidget()
         lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 6, 0)
+        params_box = QGroupBox("Parameters")
+        pl = QVBoxLayout(params_box)
         head = QHBoxLayout()
         head.addWidget(
-            QLabel("<b>Parameters</b> -- type a value to hold it, untick to switch it off")
+            set_role(QLabel("Type a value to hold it, untick to switch it off."), "muted")
         )
         head.addStretch()
         self.clear_btn = QPushButton("Clear")
@@ -131,26 +145,24 @@ class OptimizationView(QWidget):
         )
         self.clear_btn.clicked.connect(self._clear_values)
         head.addWidget(self.clear_btn)
-        lv.addLayout(head)
+        pl.addLayout(head)
         self.tree = QTreeWidget()
         self.tree.setColumnCount(3)
         self.tree.setHeaderLabels(["parameter", "value", "active"])
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
-        lv.addWidget(self.tree)
-        note = QLabel(
-            "Empty: estimated. Number: held fixed, in the estimate and the solve. "
-            "Untick: forced to zero -- not available for fx, fy, cx, cy, without "
-            "which a camera cannot project. The reference extrinsic is always "
-            "fixed; it is the gauge."
+        pl.addWidget(self.tree)
+        note = set_role(
+            QLabel(
+                "Empty: estimated. Number: held fixed, in the estimate and the solve. "
+                "Untick: forced to zero -- not available for fx, fy, cx, cy, without "
+                "which a camera cannot project. The reference extrinsic is always "
+                "fixed; it is the gauge."
+            ),
+            "muted",
         )
         note.setWordWrap(True)
-        note.setStyleSheet("color: gray; font-size: 11px;")
-        lv.addWidget(note)
-        split.addWidget(left)
-
-        # ---------------- right: solver --------------------------------
-        right = QWidget()
-        rv = QVBoxLayout(right)
+        pl.addWidget(note)
+        lv.addWidget(params_box, 1)
 
         solver_box = QGroupBox("Solver")
         sf = QFormLayout(solver_box)
@@ -194,11 +206,17 @@ class OptimizationView(QWidget):
         self.loss_scale.setValue(2.0)
         self.loss_scale.setToolTip("Loss threshold/scale in PIXELS.")
         sf.addRow("loss scale (px)", self.loss_scale)
-        rv.addWidget(solver_box)
-
         self.options_box = QGroupBox("Backend options")
         self.options_form = QFormLayout(self.options_box)
-        rv.addWidget(self.options_box)
+        self.options_section = Section("Advanced: backend options", self.options_box)
+        sf.addRow(self.options_section)
+        lv.addWidget(solver_box)
+        split.addWidget(left)
+
+        # ---------------- right: the run --------------------------------
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(6, 0, 0, 0)
 
         # ---- starting point -------------------------------------------
         init_box = QGroupBox("Starting point")
@@ -228,13 +246,25 @@ class OptimizationView(QWidget):
         ib.addStretch()
         iv.addLayout(ib)
         self.init_summary = QLabel()
+        self.init_summary.setObjectName("init_summary")
         self.init_summary.setWordWrap(True)
         self.init_summary.setTextFormat(Qt.RichText)
-        iv.addWidget(self.init_summary)
+        self.init_summary.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        # Scrolls instead of being clipped: four cameras' lines did not fit and
+        # the last ones simply vanished below the box.
+        summary_scroll = QScrollArea()
+        summary_scroll.setObjectName("init_summary_scroll")
+        summary_scroll.setWidgetResizable(True)
+        summary_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        summary_scroll.setWidget(self.init_summary)
+        summary_scroll.setMinimumHeight(120)
+        summary_scroll.setMaximumHeight(190)
+        iv.addWidget(summary_scroll)
+        self.init_box = init_box
         rv.addWidget(init_box)
 
         btns = QHBoxLayout()
-        self.solve_btn = QPushButton("Solve")
+        self.solve_btn = primary(QPushButton("Solve"))
         self.solve_btn.clicked.connect(self._solve)
         self.build_btn = QPushButton("Build problem")
         self.build_btn.setToolTip(
@@ -264,17 +294,43 @@ class OptimizationView(QWidget):
         btns.addStretch()
         rv.addLayout(btns)
 
-        self.progress_plot = PlotCanvas(figsize=(4, 2.4), toolbar=False)
+        # ---- results: three numbers, then the descent ---------------------
+        self.results = QWidget()
+        self.results.setObjectName("solve_results")
+        cards = QHBoxLayout(self.results)
+        cards.setContentsMargins(0, 4, 0, 4)
+        self.error_card = MetricCard("Reprojection error", "error_card")
+        self.steps_card = MetricCard("Solver", "steps_card")
+        self.heldout_card = MetricCard("Held-out frames", "heldout_card")
+        for card in (self.error_card, self.steps_card, self.heldout_card):
+            cards.addWidget(card)
+        self._reset_cards()
+        rv.addWidget(self.results)
+
+        self.progress_plot = PlotCanvas(figsize=(4, 2.6), toolbar=False)
+        self.progress_plot.setObjectName("convergence_chart")
         self.progress_plot.message("no solve yet")
         rv.addWidget(self.progress_plot, 1)
 
-        # No log widget here any more: it is the shared console at the bottom
-        # of the window, visible from every tab. The progress plot takes the
-        # space it used to occupy.
+        # No log widget here: it is the shared console, a drawer at the bottom
+        # of the window, visible from every page.
         split.addWidget(right)
-        split.setSizes([560, 640])
+        split.setSizes([520, 760])
 
         self._rebuild_options()
+
+    def _reset_cards(self) -> None:
+        self.error_card.set("--", "per corner, start to solved")
+        self.steps_card.set("--", "iterations and time")
+        self.heldout_card.set("--", "not measured")
+
+    def on_theme_changed(self) -> None:
+        """Redraw the chart in the new palette; the cards restyle through the stylesheet."""
+        result = self.session.result
+        if result is not None:
+            self._plot_progress(result)
+        else:
+            self.progress_plot.message("no solve yet")
 
     # ------------------------------------------------------------------
     def _rebuild_options(self):
@@ -388,6 +444,7 @@ class OptimizationView(QWidget):
             backend=backend,
             folds=folds,
             max_iterations=self.iterations.value(),
+            template=self.session.problem,
         )
         # Bound methods of this widget, never lambdas -- see run_in_thread.
         worker.fold_done.connect(self._on_fold_done)
@@ -405,6 +462,7 @@ class OptimizationView(QWidget):
         self.session.crossval = result
         for line in result.summary_lines():
             self.log.appendPlainText(line)
+        self._show_crossval_card(result)
         self.status.emit(
             f"cross-validation: held-out RMS {result.mean_test_rms:.4f} px "
             f"vs training {result.mean_train_rms:.4f} px"
@@ -560,6 +618,9 @@ class OptimizationView(QWidget):
         )
         self.refresh()
         self._update_init_summary()
+        self._reset_cards()
+        self.error_card.set(f"{self.session.initial_rms:.3f} px", "at the starting point")
+        self.progress_plot.message("no solve yet")
         self._log(f"starting point ready -- RMS {self.session.initial_rms:.3f} px")
 
     def _on_estimate_failed(self, message: str):
@@ -581,10 +642,11 @@ class OptimizationView(QWidget):
     def _update_init_summary(self):
         """Spell out the bootstrap's own quality signals, not just its RMS."""
         s = self.session
+        p = theme.current()
         self.restore_btn.setEnabled(s.is_initialized)
         if not s.is_initialized:
             self.init_summary.setText(
-                "<span style='color:#b36b00;'><b>No starting point.</b> "
+                f"<span style='color:{p.warn};'><b>No starting point.</b> "
                 "Click <i>Estimate starting point</i>.</span>"
             )
             return
@@ -593,24 +655,34 @@ class OptimizationView(QWidget):
             f"<b>Per-corner reprojection RMS: {s.initial_rms:.3f} px</b> "
             f"({rep.get('pnp_solved', 0)} PnP poses, {rep.get('board_poses', 0)} board poses)"
         ]
-        # Per-camera OpenCV RMS: nan means too few views, so that camera still
-        # holds default parameters and is NOT actually calibrated.
+        # Per-camera bootstrap RMS: nan means too few views or a failed fit, so
+        # that camera is NOT actually calibrated yet.
         for cid, rms in (rep.get("intrinsics_rms") or {}).items():
             if math.isnan(rms):
                 lines.append(
-                    f"<span style='color:#c00;'>{cid}: intrinsics NOT estimated "
-                    f"(under 4 usable views) -- still at defaults</span>"
+                    f"<span style='color:{p.bad};'>{cid}: intrinsics NOT estimated "
+                    f"(too few usable views, or the fit failed) -- still at the "
+                    f"starting values</span>"
                 )
             else:
-                lines.append(f"{cid}: OpenCV intrinsics RMS {rms:.3f} px")
-        # Extrinsic support = frames where this camera and the reference saw the
+                lines.append(f"{cid}: intrinsics RMS {rms:.3f} px")
+        # Extrinsic support = frames where this camera and the camera it was
+        # placed from (the reference, or the next camera in a chain) saw the
         # same board. Low support is the quiet failure the bootstrap warns about.
+        parents = rep.get("extrinsic_parent") or {}
+        ref = self.session.system.reference_camera if self.session.system.cameras else None
         for cid, n in (rep.get("extrinsic_support") or {}).items():
+            parent = parents.get(cid, ref)
             if n < 0:
                 lines.append(f"{cid}: reference camera (extrinsic fixed to identity)")
+            elif parent != ref and n >= 5:
+                lines.append(
+                    f"<b>{cid}: placed through {parent}</b> ({n} shared views) — it shares "
+                    f"no view with {ref}"
+                )
             elif n < 5:
                 lines.append(
-                    f"<span style='color:#c00;'>{cid}: extrinsic from only {n} shared "
+                    f"<span style='color:{p.bad};'>{cid}: extrinsic from only {n} shared "
                     f"view(s) -- weakly observable</span>"
                 )
             else:
@@ -1060,6 +1132,9 @@ class OptimizationView(QWidget):
                 f"behind the camera during the solve."
             )
         self._plot_progress(result)
+        self._show_result_cards(result)
+        # A held-out figure belongs to the solve it was measured on.
+        self.heldout_card.set("--", "not measured")
         self._populate_tree()
         self.status.emit(result.summary())
         self.solved.emit()
@@ -1120,39 +1195,163 @@ class OptimizationView(QWidget):
         """The curve to draw: measured RMS when the backend gave one, else cost."""
         rms = [h.rms_px for h in records if h.rms_px == h.rms_px]
         if len(rms) > 1:
-            return rms, "per-corner RMS, px (log)"
-        return [h.cost for h in records if h.cost == h.cost], "cost (log)"
+            return rms, "per-corner RMS, px"
+        return [h.cost for h in records if h.cost == h.cost], "cost"
+
+    @staticmethod
+    def _plateau_start(values: list[float]) -> int | None:
+        """
+        Index where the descent settles onto its plateau, or None if it has none.
+
+        A plateau is a tail of at least three steps that all sit within the last
+        tenth of the total drop. Levenberg-Marquardt from a good start produces
+        exactly that: one large step, then many small ones.
+        """
+        low = min(values)
+        drop = values[0] - low
+        if drop <= 0:
+            return None
+        limit = low + 0.1 * drop
+        k = next(i for i, v in enumerate(values) if v <= limit)
+        if k < 1 or len(values) - k < 3 or any(v > limit for v in values[k:]):
+            return None
+        return k
+
+    def _draw_descent(self, values: list[float], label: str, final: float | None) -> None:
+        """
+        The descent in real units, never on a log axis.
+
+        A log axis made a 0.64 -> 0.13 px solve read as "dropped to nothing".
+        One linear axis is honest but empty: the first step takes all the
+        height and the refinement after it is thinner than the line. So when
+        the curve has a plateau the axis is split -- a short upper part holds
+        the start, a taller lower part is zoomed onto the plateau, where the
+        remaining steps can be read. Without a plateau it is one axis from zero.
+        """
+        with theme.mpl_context(self.progress_plot.figure) as p:
+            fig = self.progress_plot.clear()
+            fig.set_facecolor(p.surface)
+            k = self._plateau_start(values)
+            if k is None:
+                ax = fig.add_subplot(111)
+                self._plot_series(ax, values, p)
+                top = max(values) * 1.18
+                ax.set_ylim(0, top)
+                self._mark_start(ax, values, p)
+                if final is not None:
+                    self._mark_final(ax, values, final, top * 0.035, p)
+                ax.set_ylabel(label)
+                lower = ax
+            else:
+                upper, lower = fig.subplots(
+                    2, 1, sharex=True, gridspec_kw={"height_ratios": [1, 2.6], "hspace": 0.08}
+                )
+                head, tail = values[:k], values[k:]
+                gap = min(head) - max(tail)
+                upper.set_ylim(max(tail) + 0.6 * gap, max(head) + 0.12 * (max(head) - max(tail)))
+                span = max(max(tail) - min(tail), 1e-4 * abs(min(tail)), 1e-12)
+                lower.set_ylim(min(tail) - 0.18 * span, max(tail) + 0.22 * span)
+                for ax in (upper, lower):
+                    self._plot_series(ax, values, p)
+                    ax.ticklabel_format(axis="y", useOffset=False)
+                upper.yaxis.set_major_locator(MaxNLocator(nbins=3))
+                upper.spines["bottom"].set_visible(False)
+                upper.tick_params(axis="x", length=0)
+                self._mark_start(upper, values, p)
+                # The two slanted ticks that say "the axis is cut here".
+                cut = {
+                    "marker": [(-1, -0.6), (1, 0.6)],
+                    "markersize": 9,
+                    "linestyle": "none",
+                    "color": p.muted,
+                    "mew": 1,
+                    "clip_on": False,
+                }
+                upper.plot([0], [0], transform=upper.transAxes, **cut)
+                lower.plot([0], [1], transform=lower.transAxes, **cut)
+                lower.text(
+                    0.99,
+                    0.97,
+                    f"zoomed in: steps {k} to {len(values) - 1}",
+                    transform=lower.transAxes,
+                    ha="right",
+                    va="top",
+                    fontsize=9,
+                    color=p.muted,
+                )
+                if final is not None:
+                    self._mark_final(lower, values, final, 0.05 * span, p)
+                fig.supylabel(label, fontsize=10, color=p.text)
+            lower.set_xlim(-0.5, max(len(values) - 0.5, 1.5))
+            lower.set_xlabel("iteration")
+            lower.xaxis.set_major_locator(MaxNLocator(integer=True))
+            self.progress_plot.draw()
+
+    @staticmethod
+    def _plot_series(ax, values: list[float], p) -> None:
+        ax.plot(range(len(values)), values, "-o", lw=2.0, ms=4.5, color=p.accent, zorder=3)
+        ax.grid(True, axis="y", alpha=0.6)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+
+    @staticmethod
+    def _mark_start(ax, values: list[float], p) -> None:
+        ax.annotate(
+            f"{values[0]:.3f} px",
+            xy=(0, values[0]),
+            xytext=(10, 0),
+            textcoords="offset points",
+            va="center",
+            fontsize=9,
+            color=p.muted,
+        )
+
+    @staticmethod
+    def _mark_final(ax, values: list[float], final: float, lift: float, p) -> None:
+        ax.axhline(final, color=p.muted, lw=1.0, ls="--", zorder=2)
+        ax.text(
+            len(values) - 1,
+            final + lift,
+            f"{final:.3f} px",
+            ha="right",
+            va="bottom",
+            color=p.text,
+            fontsize=10,
+        )
 
     def _plot_live(self) -> None:
-        """Redraw the descent so far. Same axes as the final plot, no title yet."""
+        """The descent so far, on the same axes as the final plot."""
         values, label = self._series(self._live)
         if len(values) < 2:
             return
-        fig = self.progress_plot.clear()
-        ax = fig.add_subplot(111)
-        ax.plot(values, lw=1.2)
-        ax.set_yscale("log")
-        ax.set_xlabel("step")
-        ax.set_ylabel(label)
-        ax.set_title(f"solving... {len(self._live)} steps", fontsize=9)
-        ax.grid(alpha=0.3)
-        self.progress_plot.draw()
+        self._draw_descent(values, label, final=None)
 
     def _plot_progress(self, result):
-        fig = self.progress_plot.clear()
-        ax = fig.add_subplot(111)
         values, label = self._series(result.history)
-        if len(values) > 1:
-            ax.plot(values, lw=1.2)
-            ax.set_yscale("log")
-            ax.set_xlabel("step")
-            ax.set_ylabel(label)
-        else:
-            ax.bar(["initial", "final"], [result.initial_rms_px, result.final_rms_px])
-            ax.set_ylabel("per-corner RMS, px")
-        ax.set_title(
-            f"{result.backend}: RMS {result.initial_rms_px:.3f} -> {result.final_rms_px:.3f} px",
-            fontsize=9,
+        if len(values) < 2:
+            values = [result.initial_rms_px, result.final_rms_px]
+            label = "per-corner RMS, px"
+        final = result.final_rms_px if label.startswith("per-corner") else values[-1]
+        self._draw_descent(values, label, final=final)
+
+    def _show_result_cards(self, result) -> None:
+        ok = result.success
+        self.error_card.set(
+            f"{result.initial_rms_px:.3f} → {result.final_rms_px:.3f} px",
+            "per corner, start to solved",
+            tone=None if ok else "bad",
         )
-        ax.grid(alpha=0.3)
-        self.progress_plot.draw()
+        self.steps_card.set(
+            f"{result.iterations} it, {result.time_seconds:.1f} s",
+            f"{result.backend}, {'converged' if ok else 'did NOT converge'}",
+            tone=None if ok else "bad",
+        )
+
+    def _show_crossval_card(self, result) -> None:
+        ratio = result.optimism_ratio
+        tone = "good" if ratio < 1.2 else ("warn" if ratio < 1.5 else "bad")
+        self.heldout_card.set(
+            f"{ratio:.2f}× training",
+            f"{result.mean_test_rms:.3f} px on unseen frames",
+            tone=tone,
+        )

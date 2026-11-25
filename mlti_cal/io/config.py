@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -426,24 +427,14 @@ def build_system_from_config(
     for board in config.boards:
         kind = board_kind(board)
         spec = board_spec(board)
-        # The meta block describes the board in ITS OWN vocabulary. A dot grid
-        # reported as having "squares" would be a lie in the one place a reader
-        # goes to find out what was actually calibrated against.
-        if kind == "circle_grid":
-            meta = {
-                "circles_x": spec.circles_x,
-                "circles_y": spec.circles_y,
-                "spacing": spec.spacing,
-                "grid_type": spec.grid_type,
-            }
-        else:
-            meta = {
-                "squares_x": spec.squares_x,
-                "squares_y": spec.squares_y,
-                "square_length": spec.square_length,
-            }
-            if kind == "charuco":
-                meta["dictionary"] = spec.dictionary
+        # The meta block describes the board in ITS OWN vocabulary -- the fields
+        # its kind declares -- so a dot grid never claims "squares" and a
+        # plug-in's object is described as well as a built-in one.
+        meta = {
+            opt.name: getattr(spec, opt.name)
+            for opt in get_kind(kind).board_fields
+            if hasattr(spec, opt.name)
+        }
         system.add_board(
             Board(
                 id=spec.id,
@@ -528,14 +519,29 @@ def build_system_from_config(
             "frames_with_detections": len(found_frames),
         }
 
+    # Plug-in detectors keep their own tallies (see plugins/function_detector):
+    # images they were refused on, and target ids no configured object owns.
+    # Reported, because "0 detections" is otherwise all a user sees of either.
+    stats["plugins"] = {
+        kind_id: {"rejected_images": group.rejected_images, "unknown_ids": group.unknown_ids}
+        for kind_id, group in detector.groups.items()
+        if hasattr(group, "rejected_images")
+    }
+
     if len(frames_by_camera) > 1:
-        shared = set.intersection(*frames_by_camera.values())
+        # Shared by at least TWO cameras, not by all of them: a rig where cam3
+        # never sees what cam0 sees is still calibratable through the cameras in
+        # between, and the bootstrap checks that chain properly. What this can
+        # catch is a camera whose file names match nobody else's.
+        seen_by = Counter(f for frames in frames_by_camera.values() for f in frames)
+        shared = {f for f, n in seen_by.items() if n > 1}
         stats["shared_frames"] = len(shared)
-        if not shared:
+        isolated = [cid for cid, frames in frames_by_camera.items() if not frames & shared]
+        if isolated:
             raise ValueError(
-                "No frame name is common to all cameras. Frames are matched by "
-                "filename stem; rename synchronised captures to share a stem "
-                "(e.g. cam0/0001.png and cam1/0001.png)."
+                f"camera(s) {isolated} share no frame name with any other camera. "
+                f"Frames are matched by filename stem; rename synchronised captures "
+                f"to share a stem (e.g. cam0/0001.png and cam1/0001.png)."
             )
     # `add_camera` already maintains the one-reference invariant, including
     # honouring an explicitly flagged non-first camera. Only the all-unflagged
@@ -544,6 +550,23 @@ def build_system_from_config(
         system.set_reference_camera(next(iter(system.cameras)))
     stats["reference_camera"] = system.reference_camera if system.cameras else None
     return system, stats
+
+
+def plugin_stat_lines(stats: dict) -> list[str]:
+    """One line per plug-in detector that skipped images or saw foreign ids."""
+    lines = []
+    for kind_id, s in (stats.get("plugins") or {}).items():
+        if s["rejected_images"]:
+            lines.append(
+                f"plug-in {kind_id}: {s['rejected_images']} image(s) skipped because "
+                f"detect() broke the contract (the log says how)"
+            )
+        if s["unknown_ids"]:
+            lines.append(
+                f"plug-in {kind_id}: {s['unknown_ids']} detected target(s) had ids in no "
+                f"object's points file -- other targets in the scene, or a numbering mismatch"
+            )
+    return lines
 
 
 # ---------------------------------------------------------------------------

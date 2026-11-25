@@ -8,17 +8,41 @@ in the parameters I estimated?
 
 Method
     1. Unproject pixel q to a ray, place a point on it at distance `range_m`.
-    2. Differentiate that point's projection w.r.t. every FREE parameter that
-       affects it -- this camera's intrinsics AND its extrinsic.
+    2. Hold that point fixed RELATIVE TO THE CALIBRATION BOARDS, not in the
+       camera frame (see below), and differentiate its projection w.r.t. every
+       FREE parameter that affects it -- this camera's intrinsics, its
+       extrinsic, AND every board pose.
     3. Propagate the JOINT covariance:   Sigma_uv = J Sigma J^T
     4. Report the 1-sigma ellipse.
 
+Why the point is fixed to the boards (`reference="boards"`)
+    The camera frame is not a physical thing; it is defined by the solve. A
+    noise draw that moves cx by 10 px also rotates every board pose to
+    compensate, and a physical point keeps projecting to almost the same pixel.
+    Holding the point fixed in camera coordinates ignores that compensation and
+    reports sigma(cx) at the image centre -- measured: 10.35 px claimed where
+    Monte Carlo re-solves spread by 0.84 px. So the point is carried into each
+    board's frame with the solved pose, moved with the perturbed pose, and the
+    results are averaged over all boards (mrcal's "mean-pcam" method):
+
+        p_rig*  = mean_i  T_rig_board_i' * inv(T_rig_board_i) * p_rig
+        q*      = project(intrinsics', T_cam_rig' * p_rig*)
+
+    With this repo's retraction (t += dt, R <- R Exp(phi)) the mean is exactly
+    one rigid motion  d(p_rig) = a - skew(p_rig) b,  with
+        a = mean_i (dt_i + skew(t_i) R_i phi_i),    b = mean_i (R_i phi_i)
+    so the whole set of pose blocks collapses into six numbers and the cost
+    does not grow with the number of frames.
+
+    `reference="camera"` keeps the old quantity. It answers "how loosely is
+    the camera frame itself pinned down", which is a diagnostic, not a
+    projection error.
+
 Why the joint covariance and not just the intrinsics block
-    Intrinsics and extrinsics are strongly correlated -- focal length trades
-    against distance almost perfectly. Propagating only the intrinsic block
-    ignores those cross terms and produces an uncertainty that is too small,
-    usually by a wide margin. Using the full joint block is what makes the
-    number honest.
+    Intrinsics, extrinsics and board poses are strongly correlated -- focal
+    length trades against distance almost perfectly. Propagating only the
+    intrinsic block ignores those cross terms. Using the full joint block is
+    what makes the number honest.
 
 Range dependence is real, not a nuisance parameter
     Uncertainty at 1 m and at 100 m are genuinely different, because focal
@@ -34,9 +58,10 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from mlti_cal.models.manifolds import d_point_d_pose_tangent, quat_to_matrix
+from mlti_cal.models.camera import get_model
+from mlti_cal.models.manifolds import d_point_d_pose_tangent, quat_to_matrix, skew, skew_stack
 from mlti_cal.problem.graph import Problem
-from mlti_cal.problem.reprojection import extr_key, intr_key
+from mlti_cal.problem.reprojection import extr_key, intr_key, pose_key
 from mlti_cal.problem.types import CalibrationSystem
 from mlti_cal.report.covariance import CovarianceResult
 
@@ -50,6 +75,9 @@ class UncertaintyMap:
     sigma_max: np.ndarray  # (H,W) 1-sigma along the worst direction, px
     sigma_rms: np.ndarray  # (H,W) sqrt(trace/2), px
     valid: np.ndarray  # (H,W) bool
+    #: What the query point was held fixed to: "boards" (physical projection
+    #: error) or "camera" (looseness of the camera frame). See module docstring.
+    reference: str = "boards"
 
     def worst(self) -> float:
         v = self.sigma_max[self.valid]
@@ -72,6 +100,7 @@ class UncertaintyMap:
         return {
             "camera": self.camera,
             "range_m": self.range_m,
+            "reference": self.reference,
             "worst_sigma_px": self.worst(),
             "best_sigma_px": self.best(),
             "centre_sigma_px": self.at_centre(),
@@ -101,9 +130,11 @@ def unproject(
     """
     Pixels -> unit rays in the camera frame, inverting the distortion.
 
-    Returns (rays, valid). OpenCV's iterative undistortion is used rather than a
-    hand-rolled inverse, so the map stays consistent with the code that will
-    actually undistort the user's images.
+    Returns (rays, valid). For OpenCV-compatible models OpenCV's own
+    undistortion is used, so the map stays consistent with the code that will
+    actually undistort the user's images. Every other model inverts its own
+    projection (`undistort_to_normalised`): handing its coefficients to OpenCV
+    would either raise or, worse, undistort by the wrong law.
 
     THE VALIDITY CHECK IS NOT OPTIONAL. A distortion polynomial fitted on the
     middle of the sensor is frequently non-invertible near the corners, and
@@ -114,22 +145,26 @@ def unproject(
     marking the failures invalid turns a nonsense number into an honest
     "outside the region this calibration can speak for".
     """
-    pts = np.asarray(pixels, dtype=float).reshape(-1, 1, 2)
-    fx, fy, cx, cy = params[:4]
-    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]])
-    dist = np.asarray(params[4:], dtype=float)
-    if model_name == "fisheye_kb":
-        norm = cv2.fisheye.undistortPoints(pts, K, dist.reshape(4, 1)).reshape(-1, 2)
+    if model is None:
+        model = get_model(model_name)
+    pts = np.asarray(pixels, dtype=float).reshape(-1, 2)
+    if model.opencv_compatible:
+        K = model.matrix(params)
+        dist = model.distortion(params)
+        if model_name == "fisheye_kb":
+            norm = cv2.fisheye.undistortPoints(pts.reshape(-1, 1, 2), K, dist.reshape(4, 1))
+        else:
+            norm = cv2.undistortPoints(pts.reshape(-1, 1, 2), K, dist.reshape(1, -1))
+        norm = norm.reshape(-1, 2)
     else:
-        norm = cv2.undistortPoints(pts, K, dist.reshape(1, -1)).reshape(-1, 2)
+        norm = model.undistort_to_normalised(params, pts)
     rays = np.column_stack([norm, np.ones(norm.shape[0])])
 
     valid = np.all(np.isfinite(rays), axis=1)
-    if model is not None:
-        safe = np.where(valid[:, None], rays, np.array([0.0, 0.0, 1.0]))
-        back = model.project(params, safe)
-        err = np.linalg.norm(back - np.asarray(pixels, dtype=float), axis=1)
-        valid &= np.isfinite(err) & (err < tolerance_px)
+    safe = np.where(valid[:, None], rays, np.array([0.0, 0.0, 1.0]))
+    back = model.project(params, safe)
+    err = np.linalg.norm(back - pts, axis=1)
+    valid &= np.isfinite(err) & (err < tolerance_px)
 
     norms = np.linalg.norm(rays, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
@@ -143,6 +178,7 @@ def projection_uncertainty(
     camera_id: str,
     range_m: float,
     grid_step: int = 24,
+    reference: str = "boards",
 ) -> UncertaintyMap:
     """
     Per-pixel 1-sigma projection uncertainty for one camera at one range.
@@ -150,41 +186,89 @@ def projection_uncertainty(
     Args:
         range_m: distance from the camera along the ray, in metres. Required --
             see the module docstring on why there is no default.
+        reference: "boards" (default) holds the query point fixed relative to
+            the calibration boards -- the physical projection error. "camera"
+            holds it fixed in camera coordinates -- a frame-looseness diagnostic.
     """
     if range_m <= 0:
         raise ValueError("range_m must be positive and is required")
+    if reference not in ("boards", "camera"):
+        raise ValueError(f"reference must be 'boards' or 'camera', got {reference!r}")
     cam = system.cameras[camera_id]
     model = cam.model
     w, h = cam.image_size
+
+    def solved(key: str, fallback: np.ndarray) -> np.ndarray:
+        # Linearise at the values the covariance was computed at. Reading them
+        # from `system` would mix stale values with a fresh covariance whenever
+        # a report is built before `write_back`.
+        blk = problem.blocks.get(key)
+        return np.asarray(blk.value if blk is not None else fallback, dtype=float)
+
+    params = solved(intr_key(camera_id), cam.params)
 
     us = np.arange(grid_step // 2, w, grid_step)
     vs = np.arange(grid_step // 2, h, grid_step)
     gu, gv = np.meshgrid(us, vs)
     pix = np.column_stack([gu.ravel(), gv.ravel()]).astype(float)
 
-    rays, ray_valid = unproject(cam.model_name, cam.params, pix, model=model)
+    rays, ray_valid = unproject(cam.model_name, params, pix, model=model)
     X_cam = rays * range_m
 
     ik, i_sel = _block_columns(problem, intr_key(camera_id))
     ek, e_sel = _block_columns(problem, extr_key(camera_id))
-    gidx = np.concatenate([ik, ek])
-    if gidx.size == 0:
-        raise ValueError(f"camera {camera_id} has no free parameters to propagate")
-    Sigma = cov.covariance[np.ix_(gidx, gidx)]
 
-    _, J_theta, J_X = model.d_project(cam.params, X_cam)
+    # M maps the full free-parameter vector onto the few numbers the projection
+    # depends on: [this camera's intrinsics | its extrinsic | mean board motion].
+    # Reducing the covariance through M first keeps the per-pixel Jacobian a
+    # handful of columns wide however many frames there are.
+    E = solved(extr_key(camera_id), cam.extrinsic)
+    R_E = quat_to_matrix(E[3:7])
+    X_rig = (X_cam - E[0:3]) @ R_E  # the sampled point in the rig frame
+    mean_motion = np.zeros((6, cov.covariance.shape[0]))
+    num_poses = 0
+    if reference == "boards":
+        for frame, board in system.board_poses:
+            key = pose_key(frame, board)
+            if key not in problem.blocks:
+                continue
+            num_poses += 1  # a pinned pose still counts: its copy of the point stays put
+            cols, sel = _block_columns(problem, key)
+            if cols.size == 0:
+                continue
+            pose = np.asarray(problem.blocks[key].value, dtype=float)
+            R_i = quat_to_matrix(pose[3:7])
+            A = np.zeros((6, 6))  # [a; b] contribution of [dt_i | phi_i]
+            A[0:3, 0:3] = np.eye(3)
+            A[0:3, 3:6] = skew(pose[0:3]) @ R_i
+            A[3:6, 3:6] = R_i
+            mean_motion[:, cols] = A[:, sel]
+    has_motion = num_poses > 0 and bool(np.any(mean_motion))
+    num_reduced = ik.size + ek.size + (6 if has_motion else 0)
+    if num_reduced == 0:
+        raise ValueError(f"camera {camera_id} has no free parameters to propagate")
+    M = np.zeros((num_reduced, cov.covariance.shape[0]))
+    own = np.concatenate([ik, ek])
+    M[np.arange(own.size), own] = 1.0
+    if has_motion:
+        M[own.size :] = mean_motion / num_poses
+    Sigma = M @ cov.covariance @ M.T
+
+    _, J_theta, J_X = model.d_project(params, X_cam)
 
     parts = []
     if i_sel.size:
         parts.append(J_theta[:, :, i_sel])
     if e_sel.size:
-        E = cam.extrinsic
-        R_E = quat_to_matrix(E[3:7])
-        # X_rig for the sampled point, needed for the extrinsic Jacobian.
-        X_rig = (X_cam - E[0:3]) @ R_E
         d_extr = d_point_d_pose_tangent(np.eye(3), R_E, X_rig)  # (N,3,6)
         J_e = np.einsum("nij,njk->nik", J_X, d_extr)[:, :, e_sel]
         parts.append(J_e)
+    if has_motion:
+        # d(p_cam)/d[a; b] = R_E [ I | -skew(p_rig) ]
+        d_rig = np.concatenate(
+            [np.broadcast_to(np.eye(3), (len(X_rig), 3, 3)), -skew_stack(X_rig)], axis=2
+        )
+        parts.append(np.einsum("nij,jk,nkl->nil", J_X, R_E, d_rig))
     J = np.concatenate(parts, axis=2)  # (N,2,K)
 
     # Sigma_uv = J Sigma J^T, batched over pixels.
@@ -214,6 +298,7 @@ def projection_uncertainty(
         sigma_max=sigma_max,
         sigma_rms=sigma_rms,
         valid=valid,
+        reference=reference,
     )
 
 
